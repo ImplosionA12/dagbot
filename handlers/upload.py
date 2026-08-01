@@ -17,6 +17,7 @@ from telegram.ext import (
 )
 
 from event_store import list_events, get_event, save_event, event_folder, slugify
+from generators.file_utils import safe_filename
 from handlers.ui import resolve_text
 
 UP_ASK, UP_EVENT, UP_NEW_NAME, UP_KIND, UP_REPLACE = range(90, 95)
@@ -41,7 +42,7 @@ def kind_files(folder: str, kind: str) -> list[str]:
 
 def _file_stem(event_name: str) -> str:
     """The generators' filename convention, so uploads sit beside originals."""
-    return (event_name or 'Event').replace(' ', '_').replace('/', '_')
+    return safe_filename(event_name)
 
 
 async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):

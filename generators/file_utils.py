@@ -16,6 +16,31 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+_ILLEGAL_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    *(f'COM{i}' for i in range(1, 10)),
+    *(f'LPT{i}' for i in range(1, 10)),
+}
+
+
+def safe_filename(name: str, fallback: str = 'Event', max_len: int = 80) -> str:
+    """Turn an event name into a filename Windows can actually store.
+
+    A ':' in the name is the dangerous one: "Proposal_Wipe_Out_Arena:_Reloaded.docx"
+    doesn't fail — NTFS silently writes an alternate data stream on a 0-byte file
+    named "Proposal_Wipe_Out_Arena". python-docx and Telegram both handle that
+    path fine, so the DOCX still sends, but Word and LibreOffice can't open it
+    and PDF conversion fails with no obvious cause. Strip every reserved
+    character, not just the ones that raise.
+    """
+    cleaned = _ILLEGAL_FILENAME.sub('_', (name or '').replace(' ', '_'))
+    cleaned = re.sub(r'_+', '_', cleaned).strip('._ ')[:max_len].strip('._ ')
+    if not cleaned or cleaned.upper().split('.')[0] in _RESERVED_NAMES:
+        return fallback
+    return cleaned
+
+
 def stamp_docx_author(doc):
     """Overwrite the template's original creator with our configured author.
     Templates are copied byte-for-byte, so without this the generated file

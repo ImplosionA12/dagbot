@@ -38,6 +38,7 @@ from PIL import Image as PILImage
 
 from generators.file_utils import (
     docx_to_pdf, file_to_images, stamp_docx_author, disable_soft_return_justify, modernize_docx,
+    safe_filename,
 )
 
 logger = logging.getLogger(__name__)
@@ -666,7 +667,7 @@ def _delete_checklist(doc):
 # Generator
 # ────────────────────────────────────────────────────────────────────────────
 def generate_report(data: dict, output_dir: str | None = None):
-    event_name = (data.get('event_name', 'Event') or 'Event').replace(' ', '_').replace('/', '_')
+    event_name = safe_filename(data.get('event_name', 'Event'))
     out_dir = output_dir or TEMP_DIR
     os.makedirs(out_dir, exist_ok=True)
     docx_path = os.path.join(out_dir, f"Report_{event_name}.docx")

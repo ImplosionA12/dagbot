@@ -15,6 +15,7 @@ from docx.text.paragraph import Paragraph
 
 from generators.file_utils import (
     docx_to_pdf, stamp_docx_author, disable_soft_return_justify, modernize_docx,
+    safe_filename,
 )
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -116,7 +117,7 @@ def _keep_table_together(table):
 
 # ── Generator ───────────────────────────────────────────────────────────────
 def generate_proposal(data: dict, output_dir: str | None = None):
-    event_name = (data.get('event_name', 'Event') or 'Event').replace(' ', '_').replace('/', '_')
+    event_name = safe_filename(data.get('event_name', 'Event'))
     out_dir = output_dir or TEMP_DIR
     os.makedirs(out_dir, exist_ok=True)
     docx_path = os.path.join(out_dir, f"Proposal_{event_name}.docx")

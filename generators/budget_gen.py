@@ -10,7 +10,7 @@ import openpyxl
 from copy import copy
 from openpyxl.styles import Font, Alignment
 
-from generators.file_utils import xlsx_to_pdf, xlsx_to_docx, stamp_xlsx_author
+from generators.file_utils import xlsx_to_pdf, xlsx_to_docx, stamp_xlsx_author, safe_filename
 
 TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'temp')
 TEMPLATE = os.path.join(os.path.dirname(os.path.dirname(__file__)),
@@ -92,8 +92,13 @@ def generate_budget(data: dict, output_dir: str | None = None):
 
     # ── Header info ─────────────────────────────────────────────────────────
     _write_cell(ws, CELL_CLUB,        data.get('club', ''))
-    _write_cell(ws, CELL_COORDINATOR, data.get('coordinator', ''),
-                align='left')
+    # C5's label is "Name and phone number of the Coordinator" — the phone is a
+    # separate config value, so join it back on here.
+    coordinator = (data.get('coordinator', '') or '').strip()
+    phone = (data.get('coordinator_phone', '') or '').strip()
+    if phone and phone not in coordinator:
+        coordinator = f"{coordinator}, {phone}" if coordinator else phone
+    _write_cell(ws, CELL_COORDINATOR, coordinator, align='left')
     ws['C5'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
     _write_cell(ws, CELL_EMP_ID,      data.get('emp_id', ''))
     _write_cell(ws, CELL_EVENT_NAME,  data.get('event_name', ''))
@@ -196,7 +201,7 @@ def generate_budget(data: dict, output_dir: str | None = None):
     _write_cell(ws, CELL_EMP_ID_SIG, data.get('emp_id', ''))
 
     # ── Save ───────────────────────────────────────────────────────────────
-    event_name = (data.get('event_name', 'Event') or 'Event').replace(' ', '_').replace('/', '_')
+    event_name = safe_filename(data.get('event_name', 'Event'))
     out_dir = output_dir or TEMP_DIR
     os.makedirs(out_dir, exist_ok=True)
     xlsx_path = os.path.join(out_dir, f"Budget_{event_name}.xlsx")
