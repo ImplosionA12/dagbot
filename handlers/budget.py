@@ -6,7 +6,7 @@ from telegram.ext import (
 
 from config import fixed_profile
 from event_store import list_events
-from handlers.ui import DONE_KB, DONE_NONE_KB, CONFIRM_KB, resolve_text
+from handlers.ui import DONE_KB, DONE_NONE_KB, CONFIRM_KB, resolve_text, md_escape
 
 B_CLUB, B_COORD, B_EMPID, B_EVENT, B_DATE, \
 B_REV_ITEMS, B_EXP_ITEMS, B_CONFIRM, B_PICK = range(200, 209)
@@ -72,14 +72,14 @@ async def budget_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             b['date'] = flow.get('date', '')
 
     if b.get('date'):
-        msg = (f"✅ Using event: *{b['event_name']}*\n_(Date: {b['date']})_\n\n"
+        msg = (f"✅ Using event: *{md_escape(b['event_name'])}*\n_(Date: {md_escape(b['date'])})_\n\n"
                f"*Revenue Items (Budget)*\n\n"
                f"Send each revenue item in this format:\n`Particulars, Qty, Rate`\n\n"
                f"E.g. `Registration Fee, 50, 100`\n\nTap *None* if no revenue. Tap *Done* when finished.")
         markup = DONE_NONE_KB
         next_state = B_REV_ITEMS
     else:
-        msg = (f"✅ Using event: *{b['event_name']}*\n\n*Event date?*\n\nFormat: DD-MM-YYYY")
+        msg = (f"✅ Using event: *{md_escape(b['event_name'])}*\n\n*Event date?*\n\nFormat: DD-MM-YYYY")
         markup = ReplyKeyboardRemove()
         next_state = B_DATE
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=markup)
@@ -153,7 +153,7 @@ async def budget_rev_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'a_qty': qty, 'a_rate': rate, 'a_amount': amount
         })
         await update.effective_message.reply_text(
-            f"✅ Added: *{particulars}* — {qty} × ₹{rate} = ₹{amount}\n\nSend next item or tap *Done*.",
+            f"✅ Added: *{md_escape(particulars)}* — {qty} × ₹{rate} = ₹{amount}\n\nSend next item or tap *Done*.",
             parse_mode="Markdown", reply_markup=DONE_KB
         )
     except Exception:
@@ -185,7 +185,7 @@ async def budget_exp_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'a_qty': a_qty, 'a_rate': a_rate, 'a_amount': a_qty * a_rate
         })
         await update.effective_message.reply_text(
-            f"✅ Added: *{particulars}*\n"
+            f"✅ Added: *{md_escape(particulars)}*\n"
             f"  Budget: {b_qty} × ₹{b_rate} = ₹{b_qty * b_rate}\n"
             f"  Actual: {a_qty} × ₹{a_rate} = ₹{a_qty * a_rate}\n\n"
             f"Send next item or tap *Done*.",
@@ -208,19 +208,22 @@ async def _budget_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     surplus_b = rev_total - exp_b_total
     surplus_a = rev_total - exp_a_total
 
+    # Particulars and the header fields are all typed by the user — escape them
+    # or one '_' takes the whole summary down.
+    e = md_escape
     exp_lines = "\n".join([
-        f"  • {i['particulars']}: Budget ₹{i['b_amount']} | Actual ₹{i['a_amount']}"
+        f"  • {e(i['particulars'])}: Budget ₹{i['b_amount']} | Actual ₹{i['a_amount']}"
         for i in b['expenditure']
     ])
-    rev_lines = "\n".join([f"  • {i['particulars']}: ₹{i['b_amount']}" for i in b['revenue']]) if b['revenue'] else "  None"
+    rev_lines = "\n".join([f"  • {e(i['particulars'])}: ₹{i['b_amount']}" for i in b['revenue']]) if b['revenue'] else "  None"
 
     summary = (
         f"💰 *Budget Summary*\n\n"
-        f"*Club:* {b['club']}\n"
-        f"*Coordinator:* {b['coordinator']}\n"
-        f"*Emp ID:* {b['emp_id']}\n"
-        f"*Event:* {b['event_name']}\n"
-        f"*Date:* {b['date']}\n\n"
+        f"*Club:* {e(b['club'])}\n"
+        f"*Coordinator:* {e(b['coordinator'])}\n"
+        f"*Emp ID:* {e(str(b['emp_id']))}\n"
+        f"*Event:* {e(b['event_name'])}\n"
+        f"*Date:* {e(b['date'])}\n\n"
         f"*Revenue:*\n{rev_lines}\n"
         f"*Revenue Total:* ₹{rev_total}\n\n"
         f"*Expenditure:*\n{exp_lines}\n"
@@ -249,16 +252,20 @@ async def budget_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         xlsx_path, docx_path, pdf_path = generate_budget(b, output_dir=out_dir)
         upsert_flow(update.effective_user.id, event_name, 'budget', b)
 
+        # Filenames come from the paths themselves: the event name is sanitised
+        # before it reaches disk, so re-deriving it here would drift.
         with open(xlsx_path, 'rb') as f:
-            await update.effective_message.reply_document(f, filename=f"Budget_{event_name}.xlsx")
+            await update.effective_message.reply_document(f, filename=os.path.basename(xlsx_path))
         if docx_path and os.path.exists(docx_path):
             with open(docx_path, 'rb') as f:
-                await update.effective_message.reply_document(f, filename=f"Budget_{event_name}.docx")
-        if pdf_path and os.path.exists(pdf_path):
+                await update.effective_message.reply_document(f, filename=os.path.basename(docx_path))
+        pdf_ok = bool(pdf_path) and os.path.exists(pdf_path)
+        if pdf_ok:
             with open(pdf_path, 'rb') as f:
-                await update.effective_message.reply_document(f, filename=f"Budget_{event_name}.pdf")
+                await update.effective_message.reply_document(f, filename=os.path.basename(pdf_path))
         await update.effective_message.reply_text(
-            f"✅ *Budget form generated!*\n\n"
+            (f"✅ *Budget form generated!*\n\n" if pdf_ok else
+             f"⚠️ *Budget form generated, but PDF conversion failed* — XLSX/DOCX only.\n\n") +
             f"Event saved under: *{event_name}*\n"
             f"Send /start to generate another document.",
             parse_mode="Markdown"

@@ -6,7 +6,7 @@ from telegram.ext import (
 
 from config import fixed_profile
 from event_store import list_events, event_status_label
-from handlers.ui import DONE_KB, NONE_KB, CONFIRM_KB, OVERFLOW_KB, resolve_text
+from handlers.ui import DONE_KB, NONE_KB, CONFIRM_KB, OVERFLOW_KB, resolve_text, md_escape
 
 # States
 P_CLUB, P_COORD, P_EVENT, P_VENUE, P_DATE, P_DURATION, P_BUDGET, P_EXTRA, \
@@ -74,7 +74,7 @@ async def proposal_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not p.get('date'):
             p['date'] = flow.get('date', '')
 
-    msg = f"✅ Using event: *{p['event_name']}*\n\n"
+    msg = f"✅ Using event: *{md_escape(p['event_name'])}*\n\n"
     if p.get('venue') and p.get('date'):
         msg += f"_(Venue: {p['venue']} · Date: {p['date']})_\n\n*Duration?*\nE.g. 1.5 hours (9:00 PM – 10:30 PM)"
         next_state = P_DURATION
@@ -185,7 +185,7 @@ async def proposal_budget_item(update: Update, context: ContextTypes.DEFAULT_TYP
             'total': total
         })
         await update.effective_message.reply_text(
-            f"✅ Added: *{item_name}* — {qty} × ₹{rate} = ₹{total}\n\nSend next item or tap *Done*.",
+            f"✅ Added: *{md_escape(item_name)}* — {qty} × ₹{rate} = ₹{total}\n\nSend next item or tap *Done*.",
             parse_mode="Markdown", reply_markup=DONE_KB
         )
     except Exception:
@@ -196,23 +196,42 @@ async def proposal_budget_item(update: Update, context: ContextTypes.DEFAULT_TYP
     return P_BUDGET_ITEMS
 
 
+def _budget_mismatch_note(total_budget, grand_total: int) -> str:
+    """The proposal prints the Total Budget the user typed *and* the sum of the
+    budget items, in two different places. Nothing kept them in agreement, so a
+    typo in either sailed through to a document that contradicts itself."""
+    try:
+        stated = int(str(total_budget).replace(',', '').replace('₹', '').strip())
+    except (TypeError, ValueError):
+        return ''                       # 'Nil'/free text — nothing to compare
+    if stated == grand_total:
+        return ''
+    return (f"⚠️ *Total Budget says ₹{stated} but the items add up to "
+            f"₹{grand_total}.* Both appear in the document — cancel and redo "
+            f"if that's not deliberate.\n\n")
+
+
 async def _proposal_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = context.user_data['proposal']
-    items_text = "\n".join([f"  • {i['item']}: {i['qty']} × ₹{i['rate']} = ₹{i['total']}" for i in p['budget_items']])
+    # Everything below is text the user typed; a bare '_' or '*' would otherwise
+    # break the whole summary's Markdown.
+    e = md_escape
+    items_text = "\n".join([f"  • {e(i['item'])}: {i['qty']} × ₹{i['rate']} = ₹{i['total']}" for i in p['budget_items']])
     grand_total = sum(i['total'] for i in p['budget_items'])
 
     summary = (
         f"📋 *Proposal Summary*\n\n"
-        f"*Club:* {p['club']}\n"
-        f"*Coordinator:* {p['coordinator']}\n"
-        f"*Event:* {p['event_name']}\n"
-        f"*Venue:* {p['venue']}\n"
-        f"*Date:* {p['date']}\n"
-        f"*Duration:* {p['duration']}\n"
-        f"*Total Budget:* ₹{p['total_budget']}\n"
-        f"*Extra Requirements:* {p['extra']}\n\n"
+        f"*Club:* {e(p['club'])}\n"
+        f"*Coordinator:* {e(p['coordinator'])}\n"
+        f"*Event:* {e(p['event_name'])}\n"
+        f"*Venue:* {e(p['venue'])}\n"
+        f"*Date:* {e(p['date'])}\n"
+        f"*Duration:* {e(p['duration'])}\n"
+        f"*Total Budget:* ₹{e(str(p['total_budget']))}\n"
+        f"*Extra Requirements:* {e(p['extra'])}\n\n"
         f"*Budget Items:*\n{items_text}\n"
         f"*Grand Total:* ₹{grand_total}\n\n"
+        f"{_budget_mismatch_note(p.get('total_budget'), grand_total)}"
         f"Tap *Confirm* to generate documents or *Cancel* to restart."
     )
     await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=CONFIRM_KB)
@@ -276,13 +295,18 @@ async def _generate_proposal_docs(update: Update, context: ContextTypes.DEFAULT_
 
 async def _send_proposal_files(update: Update, docx_path, pdf_path, event_name):
     try:
+        # Send under the name the file actually has on disk — event names get
+        # sanitised on the way to the filesystem, and a mismatch here is how a
+        # broken path stayed invisible.
         with open(docx_path, 'rb') as f:
-            await update.effective_message.reply_document(f, filename=f"Proposal_{event_name}.docx")
-        if pdf_path and os.path.exists(pdf_path):
+            await update.effective_message.reply_document(f, filename=os.path.basename(docx_path))
+        pdf_ok = bool(pdf_path) and os.path.exists(pdf_path)
+        if pdf_ok:
             with open(pdf_path, 'rb') as f:
-                await update.effective_message.reply_document(f, filename=f"Proposal_{event_name}.pdf")
+                await update.effective_message.reply_document(f, filename=os.path.basename(pdf_path))
         await update.effective_message.reply_text(
-            f"✅ *Proposal generated successfully!*\n\n"
+            (f"✅ *Proposal generated successfully!*\n\n" if pdf_ok else
+             f"⚠️ *Proposal generated, but PDF conversion failed* — DOCX only.\n\n") +
             f"Event saved under: *{event_name}*\n"
             f"Send /start to generate another document.",
             parse_mode="Markdown"

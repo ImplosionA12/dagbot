@@ -6,7 +6,7 @@ from telegram.ext import (
 
 from config import fixed_profile
 from event_store import list_events
-from handlers.ui import DONE_KB, CONFIRM_KB, SKIP_KB, resolve_text
+from handlers.ui import DONE_KB, CONFIRM_KB, SKIP_KB, resolve_text, md_escape
 from handlers.xlsx_people import parse_people, summary
 
 # State IDs — must match bot.py
@@ -33,13 +33,22 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Upload helper — accepts photo OR document (image / PDF / Word)
 # ────────────────────────────────────────────────────────────────────────────
 async def _download_upload(update: Update, prefix: str) -> str | None:
-    """Save a photo or document upload to TEMP_DIR. Returns absolute path or None."""
-    if update.message.photo:
-        tg_file = await update.message.photo[-1].get_file()
+    """Save a photo or document upload to TEMP_DIR. Returns absolute path or None.
+
+    Every upload step also carries inline buttons, so this can be reached by a
+    button press — including a stale one from an earlier step whose callback_data
+    isn't the 'done' the caller checked for. update.message is None for those,
+    and reading .photo off it took the whole wizard step down.
+    """
+    msg = update.message
+    if msg is None:
+        return None
+    if msg.photo:
+        tg_file = await msg.photo[-1].get_file()
         ext = 'jpg'
-    elif update.message.document:
-        tg_file = await update.message.document.get_file()
-        name = update.message.document.file_name or 'file'
+    elif msg.document:
+        tg_file = await msg.document.get_file()
+        name = msg.document.file_name or 'file'
         ext = name.rsplit('.', 1)[-1].lower() if '.' in name else 'bin'
     else:
         return None
@@ -126,13 +135,13 @@ async def report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r['date'] = flow.get('date', '')
 
     summary_parts = []
-    if r.get('venue'): summary_parts.append(f"Venue: {r['venue']}")
-    if r.get('date'): summary_parts.append(f"Date: {r['date']}")
+    if r.get('venue'): summary_parts.append(f"Venue: {md_escape(r['venue'])}")
+    if r.get('date'): summary_parts.append(f"Date: {md_escape(r['date'])}")
     sub = f"\n_({' · '.join(summary_parts)})_" if summary_parts else ""
 
     keyboard = [["Online", "Offline"]]
     await update.effective_message.reply_text(
-        f"✅ Using event: *{r['event_name']}*{sub}\n\n*Mode of Conduct?*",
+        f"✅ Using event: *{md_escape(r['event_name'])}*{sub}\n\n*Mode of Conduct?*",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     )
@@ -443,8 +452,8 @@ async def report_participants(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Team sheets expand to several rows per response, so show the count back —
     # a mis-detected header is much cheaper to catch here than at PDF time.
     await update.effective_message.reply_text(
-        f"✅ Read *{summary(meta)}*.\n\n_First entry:_ {participants[0]['name']} "
-        f"({participants[0]['reg_no']})",
+        f"✅ Read *{summary(meta)}*.\n\n_First entry:_ {md_escape(participants[0]['name'])} "
+        f"({md_escape(participants[0]['reg_no'])})",
         parse_mode="Markdown"
     )
     return await _ask_has_attendance(update)
@@ -851,14 +860,17 @@ async def _report_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         budget_line = "*Budget event:* No (signed attachments skipped)\n"
 
+    # Free-text fields the user typed — a lone '_' or '*' here would make
+    # Telegram reject the entire summary.
+    e = md_escape
     summary = (
         f"📋 *Final Report Summary*\n\n"
-        f"*Club:* {r['club']}\n"
-        f"*Coordinator:* {r['coordinator']} (Emp: {r['emp_id']})\n"
-        f"*Event:* {r['event_name']}\n"
-        f"*Mode:* {r['mode']}\n"
-        f"*Venue:* {r['venue']}\n"
-        f"*Date:* {r['date']}\n\n"
+        f"*Club:* {e(r['club'])}\n"
+        f"*Coordinator:* {e(r['coordinator'])} (Emp: {e(str(r['emp_id']))})\n"
+        f"*Event:* {e(r['event_name'])}\n"
+        f"*Mode:* {e(r['mode'])}\n"
+        f"*Venue:* {e(r['venue'])}\n"
+        f"*Date:* {e(r['date'])}\n\n"
         f"{budget_line}\n"
         f"*Approval files:* {len(r['approval_images'])}\n"
         f"*Schedule entries:* {len(r['schedule'])}\n"
@@ -869,7 +881,7 @@ async def _report_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"*Winners:* {len(r['winners'])}\n"
         f"*Guest Speaker:* {len(r['speaker_files'])} file(s)"
         f"{' + bio' if r.get('speaker_bio') else ''}\n"
-        f"*Feedback link:* {r['feedback_link'] or '(none)'}\n"
+        f"*Feedback link:* {e(r['feedback_link']) or '(none)'}\n"
         f"*Expenditure:* {len(r['expenditure_files'])} file(s)\n\n"
         f"Tap *Confirm* to generate the report or *Cancel* to restart."
     )
@@ -893,11 +905,11 @@ async def report_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         upsert_flow(update.effective_user.id, event, 'report', context.user_data['report'])
 
         with open(docx_path, 'rb') as f:
-            await update.effective_message.reply_document(f, filename=f"Report_{event}.docx")
+            await update.effective_message.reply_document(f, filename=os.path.basename(docx_path))
 
         if pdf_path and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
-                await update.effective_message.reply_document(f, filename=f"Report_{event}.pdf")
+                await update.effective_message.reply_document(f, filename=os.path.basename(pdf_path))
             await update.effective_message.reply_text(
                 "✅ *Final Report generated!*\n\n"
                 "Please print, get it signed, and upload the signed version for records.\n\n"
@@ -947,14 +959,25 @@ REPORT_STATES = {
     ],
     R_BROCHURE: [
         MessageHandler(filters.PHOTO | filters.Document.IMAGE, report_brochure),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, report_brochure),
     ],
     R_SCHEDULE: [
         MessageHandler(filters.TEXT & ~filters.COMMAND, report_schedule),
         CallbackQueryHandler(report_schedule),
     ],
-    R_PARTICIPANTS: [MessageHandler(filters.Document.ALL, report_participants)],
+    # The TEXT handlers here aren't optional politeness: a state that only
+    # accepts documents leaves a typed message unclaimed by the conversation,
+    # so it falls through to the global catch-all and tells the user their
+    # session expired — mid-wizard, with everything still in progress.
+    R_PARTICIPANTS: [
+        MessageHandler(filters.Document.ALL, report_participants),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, report_participants),
+    ],
     R_HAS_ATTENDANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_has_attendance)],
-    R_ATTENDANCE_FILE: [MessageHandler(filters.Document.ALL, report_attendance_file)],
+    R_ATTENDANCE_FILE: [
+        MessageHandler(filters.Document.ALL, report_attendance_file),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, report_attendance_file),
+    ],
     R_DESCRIPTION_PURPOSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_desc_purpose)],
     R_DESCRIPTION_BRIEF: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_desc_brief)],
     R_HAS_CERTIFICATES: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_has_certificates)],

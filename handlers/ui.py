@@ -5,7 +5,18 @@ keyboard menus. Every button's callback_data is the exact text the user could
 have typed instead ("done", "none", "confirm", ...), so resolve_text() lets
 each handler treat a button press and a typed word identically.
 """
+import re
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+
+
+def md_escape(s: str) -> str:
+    """Escape Telegram legacy-Markdown specials in user-provided text.
+
+    Lives here rather than in bot.py so the wizards can reach it without
+    importing bot.py, which imports them.
+    """
+    return re.sub(r'([_*`\[])', r'\\\1', s or '')
 
 
 def _kb(*rows):

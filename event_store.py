@@ -105,8 +105,16 @@ def save_event(user_id: int, event: dict) -> str:
     now = datetime.now().isoformat(timespec='seconds')
     event['updated_at'] = now
     event.setdefault('created_at', now)
-    with open(_event_json_path(user_id, slug), 'w', encoding='utf-8') as f:
+    # Write through a temp file: a crash (or a restart) partway through a direct
+    # write leaves a truncated event.json, and every reader treats unparseable
+    # JSON as "no such event" — the whole event silently disappears.
+    path = _event_json_path(user_id, slug)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(event, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
     return slug
 
 

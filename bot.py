@@ -5,20 +5,38 @@ from telegram import (
     Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove,
     InlineKeyboardButton, InlineKeyboardMarkup
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ConversationHandler,
-    CallbackQueryHandler, PicklePersistence, filters, ContextTypes
+    CallbackQueryHandler, PicklePersistence, filters, ContextTypes, ExtBot
 )
 from dotenv import load_dotenv
 
 from config import fixed_profile, ALLOWED_USER_ID
 from event_store import list_events, get_event, delete_event, event_status_label, event_folder
-from handlers.ui import resolve_text
+from handlers.ui import resolve_text, md_escape
 
 
-def md_escape(s: str) -> str:
-    """Escape Telegram legacy-Markdown specials in user-provided names."""
-    return re.sub(r'([_*`\[])', r'\\\1', s or '')
+class MarkdownSafeBot(ExtBot):
+    """Never let a stray Markdown character swallow a message.
+
+    Nearly every reply here is sent with parse_mode="Markdown" and interpolates
+    text the user typed. One unmatched '_' or '*' in an event name or a budget
+    line item — "first_prize" is enough — makes Telegram reject the whole
+    message with "can't parse entities". The wizard step then dies mid-handler:
+    no summary, no keyboard, and the conversation sits in a state the user can't
+    see. Resending unformatted is worse-looking than the intent but always
+    arrives, so a stray underscore costs a bit of bold, not the flow.
+    """
+
+    async def send_message(self, *args, **kwargs):
+        try:
+            return await super().send_message(*args, **kwargs)
+        except BadRequest as e:
+            if kwargs.get('parse_mode') is None or "can't parse entities" not in str(e).lower():
+                raise
+            logger.warning(f"markdown rejected, resending as plain text: {e}")
+            return await super().send_message(*args, **{**kwargs, 'parse_mode': None})
 
 load_dotenv()
 
@@ -418,7 +436,7 @@ def main():
         filepath=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dagbot_state.pickle'),
         update_interval=10,
     )
-    app = (Application.builder().token(token)
+    app = (Application.builder().bot(MarkdownSafeBot(token))
            .persistence(persistence).post_init(_post_init).build())
 
     auth_filter = filters.User(user_id=ALLOWED_USER_ID)

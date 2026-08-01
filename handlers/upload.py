@@ -9,6 +9,7 @@ This lives in its own ConversationHandler, registered *after* the main one, so
 the uploads the report wizard is waiting for still reach the wizard.
 """
 import os
+import re
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -51,7 +52,12 @@ async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.document:
         file_id = msg.document.file_id
         name = msg.document.file_name or 'file'
-        ext = '.' + name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+        # The extension is taken from a filename the phone chose and then goes
+        # straight into a path, so it gets the same scrubbing as the event name.
+        raw_ext = name.rsplit('.', 1)[-1] if '.' in name else ''
+        ext = '.' + re.sub(r'[^A-Za-z0-9]', '', raw_ext).lower()[:8] if raw_ext else ''
+        if ext == '.':
+            ext = ''
     elif msg.photo:
         file_id, name, ext = msg.photo[-1].file_id, 'photo.jpg', '.jpg'
     else:

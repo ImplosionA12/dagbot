@@ -141,49 +141,133 @@ def _find_soffice() -> str | None:
     return None
 
 
+def _in_session_zero() -> bool:
+    """True when we're running as a Windows service.
+
+    Services live in session 0, which has no interactive desktop. Word and Excel
+    automation needs one: every Documents.Open()/Workbooks.Open() comes back as
+    None or raises, so under NSSM both COM paths burn a few seconds per document
+    and always lose to LibreOffice. Skipping them there is pure win — and when
+    the bot is run from a normal console, Word still gets first refusal.
+    """
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        sid = ctypes.c_ulong()
+        if k32.ProcessIdToSessionId(k32.GetCurrentProcessId(), ctypes.byref(sid)):
+            return sid.value == 0
+    except Exception:                       # non-Windows, or API unavailable
+        pass
+    return False
+
+
+_office_com_ok = None       # None = not yet decided for this process
+
+
+def _office_com_usable() -> bool:
+    """Whether trying Word/Excel COM is worth the seconds it costs."""
+    global _office_com_ok
+    if _office_com_ok is None:
+        _office_com_ok = not _in_session_zero()
+        if not _office_com_ok:
+            logger.info("running as a service (session 0) — using LibreOffice for PDFs")
+    return _office_com_ok
+
+
+def _office_com_failed(what: str, exc: Exception) -> None:
+    """Remember that COM is a dead end so the next document doesn't wait on it."""
+    global _office_com_ok
+    _office_com_ok = False
+    logger.warning(f"{what} failed, falling back to LibreOffice for the rest of this run: {exc}")
+
+
+def _soffice_convert(src: str, pdf_path: str) -> str | None:
+    """LibreOffice headless src → pdf_path. Returns the path, or None."""
+    soffice = _find_soffice()
+    if not soffice:
+        logger.error("LibreOffice not found — cannot produce a PDF.")
+        return None
+    src = os.path.abspath(src)
+    out_dir = os.path.dirname(os.path.abspath(pdf_path))
+    try:
+        result = subprocess.run(
+            [soffice, '--headless', '--norestore', '--convert-to', 'pdf',
+             '--outdir', out_dir, src],
+            capture_output=True, timeout=180
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(f"soffice timed out converting {os.path.basename(src)}")
+        return None
+    except Exception as e:
+        logger.warning(f"soffice failed: {e}")
+        return None
+
+    # soffice names its output after the *input* stem, which is only pdf_path
+    # when the caller derived one from the other. Move it if it isn't.
+    produced = os.path.join(out_dir, os.path.splitext(os.path.basename(src))[0] + '.pdf')
+    if produced != pdf_path and os.path.exists(produced):
+        try:
+            os.replace(produced, pdf_path)
+        except OSError as e:
+            logger.warning(f"could not move converted pdf into place: {e}")
+            return produced if os.path.getsize(produced) > 0 else None
+
+    if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+        return pdf_path
+    stderr = (result.stderr or b'').decode(errors='ignore').strip()
+    logger.warning(f"soffice ran but produced no pdf: {stderr or 'no error output'}")
+    return None
+
+
+def _clear_stale(pdf_path: str) -> None:
+    """Drop a PDF left by an earlier run.
+
+    Without this, a conversion that fails outright still finds the previous
+    file sitting at the output path and hands it back — so an edited document
+    silently ships last generation's PDF.
+    """
+    if os.path.exists(pdf_path):
+        try:
+            os.remove(pdf_path)
+        except OSError as e:
+            logger.warning(f"could not remove stale pdf {pdf_path}: {e}")
+
+
 def docx_to_pdf(docx_path: str) -> str | None:
     """Convert docx to pdf. Returns pdf path or None on failure."""
     pdf_path = docx_path[:-5] + '.pdf' if docx_path.lower().endswith('.docx') else docx_path + '.pdf'
+    _clear_stale(pdf_path)
 
-    # Try 1: docx2pdf (uses MS Word via COM on Windows)
-    try:
-        from docx2pdf import convert
-        convert(docx_path, pdf_path)
-        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
-            return pdf_path
-    except Exception as e:
-        logger.warning(f"docx2pdf failed: {e}")
-
-    # Try 2: soffice (LibreOffice)
-    soffice = _find_soffice()
-    if soffice:
+    # Try 1: docx2pdf (uses MS Word via COM on Windows) — best fidelity
+    if _office_com_usable():
         try:
-            result = subprocess.run(
-                [soffice, '--headless', '--convert-to', 'pdf',
-                 '--outdir', os.path.dirname(docx_path), docx_path],
-                capture_output=True, timeout=120
-            )
+            from docx2pdf import convert
+            convert(docx_path, pdf_path)
             if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
                 return pdf_path
-            logger.warning(f"soffice ran but produced no pdf: {result.stderr.decode(errors='ignore')}")
+            _office_com_failed('docx2pdf', RuntimeError('produced no pdf'))
         except Exception as e:
-            logger.warning(f"soffice failed: {e}")
+            _office_com_failed('docx2pdf', e)
+            _clear_stale(pdf_path)
 
-    return None
+    # Try 2: soffice (LibreOffice)
+    return _soffice_convert(docx_path, pdf_path)
 
 
 def xlsx_to_pdf(xlsx_path: str) -> str | None:
     """Convert xlsx → pdf via Excel COM (Windows). Falls back to soffice."""
     pdf_path = xlsx_path[:-5] + '.pdf' if xlsx_path.lower().endswith('.xlsx') else xlsx_path + '.pdf'
+    _clear_stale(pdf_path)
 
     # Try 1: Excel COM (best fidelity for spreadsheets)
-    try:
-        import win32com.client
-        excel = win32com.client.DispatchEx('Excel.Application')
-        excel.Visible = False
-        excel.DisplayAlerts = False
-        wb = excel.Workbooks.Open(os.path.abspath(xlsx_path))
+    if _office_com_usable():
+        excel = wb = None
         try:
+            import win32com.client
+            excel = win32com.client.DispatchEx('Excel.Application')
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            wb = excel.Workbooks.Open(os.path.abspath(xlsx_path))
             # Fit to a single page — the budget form is a one-pager by design;
             # wrapped long values must shrink to fit rather than spill to page 2.
             for sheet in wb.Worksheets:
@@ -192,29 +276,24 @@ def xlsx_to_pdf(xlsx_path: str) -> str | None:
                 sheet.PageSetup.FitToPagesTall = 1
                 sheet.PageSetup.Orientation = 1  # xlPortrait
             wb.ExportAsFixedFormat(0, os.path.abspath(pdf_path))  # 0 = xlTypePDF
+        except Exception as e:
+            _office_com_failed('Excel COM xlsx→pdf', e)
+            _clear_stale(pdf_path)
         finally:
-            wb.Close(SaveChanges=False)
-            excel.Quit()
+            # Open() raising left Excel running head-less and invisible with no
+            # handle to it — one orphaned EXCEL.EXE per failed conversion.
+            for close, obj in ((lambda: wb.Close(SaveChanges=False), wb),
+                               (lambda: excel.Quit(), excel)):
+                if obj is not None:
+                    try:
+                        close()
+                    except Exception:
+                        pass
         if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
             return pdf_path
-    except Exception as e:
-        logger.warning(f"Excel COM xlsx→pdf failed: {e}")
 
     # Try 2: soffice
-    soffice = _find_soffice()
-    if soffice:
-        try:
-            subprocess.run(
-                [soffice, '--headless', '--convert-to', 'pdf',
-                 '--outdir', os.path.dirname(xlsx_path), xlsx_path],
-                capture_output=True, timeout=120
-            )
-            if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
-                return pdf_path
-        except Exception as e:
-            logger.warning(f"soffice xlsx→pdf failed: {e}")
-
-    return None
+    return _soffice_convert(xlsx_path, pdf_path)
 
 
 _SUM_RE = re.compile(r'^=SUM\(([A-Z]+\d+):([A-Z]+\d+)\)$', re.I)
