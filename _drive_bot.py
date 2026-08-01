@@ -149,7 +149,10 @@ async def test_proposal(chat):
     await _skip_event_picker_if_shown(chat, r)
 
     steps = [
-        ('LiveTest Proposal 2026', 'Event name'),
+        # Deliberately nasty: the ':' used to become an NTFS alternate data
+        # stream (DOCX only, no PDF) and the '_' used to break the summary's
+        # Markdown. Both must survive a run.
+        ('LiveTest_Proposal: 2026', 'Event name'),
         ('Einstein Hall', 'Venue'),
         ('24-05-2026', 'Date'),
         ('2 hours', 'Duration'),
@@ -344,8 +347,11 @@ async def test_events_listing(chat):
 
 
 async def main():
+    # Other bots on this machine share the same Telegram account, and two
+    # processes on one .session file fight over it — point DAG_SESSION at a copy.
+    session = os.getenv('DAG_SESSION') or str(BASE / 'dag_user')
     client = Client(
-        name=str(BASE / 'dag_user'),
+        name=session,
         api_id=TG_API_ID,
         api_hash=TG_API_HASH,
         no_updates=True,

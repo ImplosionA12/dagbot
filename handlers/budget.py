@@ -19,6 +19,9 @@ async def budget_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['budget'] = {
         'club': profile['club'],
         'coordinator': profile['coordinator'],
+        # C5 is labelled "Name and phone number of the Coordinator"; the
+        # generator joins these two, and without this key it only ever got half.
+        'coordinator_phone': profile.get('coordinator_phone', ''),
         'emp_id': profile['emp_id'],
         'revenue': [],
         'expenditure': [],
