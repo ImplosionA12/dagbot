@@ -1,0 +1,24 @@
+# Secrets / credentials
+.env
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime data
+temp/
+logs/
+events/
+dagbot_state.pickle
+
+# Generated documents (templates are tracked below)
+*.docx
+*.pdf
+!templates/**
+!docs/**/*.docx
+!docs/**/*.pdf
+
+# Local editor/agent settings
+.claude/settings.local.json
