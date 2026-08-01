@@ -4,6 +4,133 @@ Running log of changes made to the DAGBot codebase. Newest entries on top.
 
 ---
 
+## 2026-08-01/02 — Repo created; the missing-PDF bug and a full audit; Edit step; report justification
+
+Started from one user report ("only doc?" — a proposal arrived as DOCX with no PDF) and ran to a full pass over the codebase. Everything below was reproduced before being fixed and verified against the live bot after.
+
+### 0. The project is now a private git repo
+
+`https://github.com/ImplosionA12/dagbot` (private). `.gitignore` extended to keep `*.session` (the Pyrogram user session is a live credential), `dagbot_state.pickle`, `logs/`, `events/`, `temp/` and `.claude/settings.local.json` out, with `!templates/**` so the blanket `*.docx`/`*.pdf` rule doesn't swallow the source templates. Two secrets were moved out of tracked code: `_drive_bot.py` had the Telegram API id/hash hardcoded (now `TG_API_ID` / `TG_API_HASH` / `BOT_USERNAME` from `.env`, documented in `.env.example`), and the coordinator's phone number was redacted from this log.
+
+### 1. A ':' in the event name silently cost every PDF
+
+Event `Wipe Out Arena: Reloaded` produced the path `Proposal_Wipe_Out_Arena:_Reloaded.docx`.
+
+**Root cause — NTFS alternate data streams.** Windows reads that colon as a stream separator, so the DOCX content landed in a *stream* on a 0-byte file:
+
+```
+Proposal_Wipe_Out_Arena     0 bytes   (:$DATA)
+   └─ :_Reloaded.docx      63,260 bytes   ← the whole document
+```
+
+python-docx and Telegram follow that path happily, which is why the DOCX still sent at 61.7 KB. Word and LibreOffice both refuse it, so both PDF paths died:
+
+```
+14:14:02  docx2pdf failed: 'NoneType' object has no attribute 'SaveAs'
+14:14:08  soffice ran but produced no pdf: Error: source file could not be loaded
+```
+
+Reproduced exactly by running soffice against the stream path. The generators only ever replaced spaces and `/`, so `< > : " \ | ? *` all passed through.
+
+**Fix** — `safe_filename()` in `generators/file_utils.py`: strips every reserved character, collapses underscore runs, caps length at 80, guards reserved device names (`CON`, `COM1`…). Used by all three generators and `handlers/upload.py` (so signed re-uploads still land beside their originals). Documents are now sent under `os.path.basename(path)` rather than a re-derived name — the mismatch between the two is what kept this invisible.
+
+Note the colon is only a problem in the *filename*; the event name itself still reads `LiveTest_Proposal: 2026` inside the document, as it should.
+
+### 2. Word/Excel COM never works under the service — it was just burning time
+
+`docx2pdf` fails on *every* service-run conversion. NSSM runs the bot as LocalSystem in **session 0**, which has no interactive desktop, so `Documents.Open()` returns None. LibreOffice was doing all the real work while ~5 s per document went to a doomed COM attempt.
+
+**Fix** — `_in_session_zero()` checks `ProcessIdToSessionId` up front and skips COM entirely there; any COM failure anywhere also disables it for the rest of the process. Run from a normal console, Word still gets first refusal. Log now shows one `running as a service (session 0) — using LibreOffice for PDFs` line and no COM attempts. Measured: 7.3 s → 3.3 s per proposal.
+
+### 3. Excel COM leaked a process on every failure
+
+`wb.Close()` / `excel.Quit()` sat in a `finally` that only ran if `Workbooks.Open()` had already succeeded. When Open raised — it did, on `Budget_IGNIS ‘S1.xlsx`, 30-07 — an invisible `EXCEL.EXE` was left running with no handle to it. One orphan per failed conversion. Now both are closed defensively regardless of where it failed.
+
+### 4. A failed conversion shipped the *previous* run's PDF
+
+`docx_to_pdf`/`xlsx_to_pdf` checked `os.path.exists(pdf_path)` without clearing stale output first, so a conversion that failed outright still found last generation's file sitting there and returned it. An edited document would have gone out with the old PDF attached. `_clear_stale()` now removes it before converting; verified that a broken source returns `None` and leaves nothing behind.
+
+Also folded both soffice invocations into one `_soffice_convert()`: absolute outdir, timeout handled separately from other errors, and the produced file moved into place when its name doesn't match the requested path.
+
+### 5. One stray underscore could kill a wizard step
+
+113 replies use `parse_mode="Markdown"` and interpolate text the user typed; only 4 sites escaped anything. A single unmatched `_` — `first_prize` is enough — makes Telegram reject the whole message with `Can't parse entities`. The exception then aborted the handler *mid-step*: no summary, no keyboard, and the conversation stuck in a state the user couldn't see.
+
+**Fix** — `MarkdownSafeBot(ExtBot)` in `bot.py` overrides `send_message`, catches that specific `BadRequest` and resends with `parse_mode=None`. One subclass covers every existing and future call site, since `reply_text` funnels through `Bot.send_message`. Verified against the live API: plain `ExtBot` raises, the subclass delivers. `md_escape` also moved to `handlers/ui.py` and applied to the values in all three summaries and their echo messages, so formatting survives too rather than degrading to plain text.
+
+### 6. Stale inline buttons crashed the upload steps
+
+`_download_upload` read `update.message.photo` directly. Every upload step *also* carries inline buttons, and a stale one from an earlier step (callback_data that isn't the `done` the caller checked for) arrives with `update.message = None`. Guarded.
+
+### 7. Document-only states told users their session had expired
+
+`R_PARTICIPANTS`, `R_ATTENDANCE_FILE` and `R_BROCHURE` registered only `filters.Document.ALL` / `PHOTO`. Typing anything there left the update unclaimed by the conversation, so it fell through to the global catch-all: *"That menu is from an earlier session… send /start"* — mid-report, with every upload already done. Each state now also routes TEXT to its own handler, which already had the right "please send an Excel/image" re-prompt.
+
+### 8. No error handler was registered at all
+
+PTB logged `No error handlers are registered, logging exception`. Any unexpected exception in a handler was logged and swallowed, leaving the user with silence — the same failure mode as #1, one layer up. `on_error` (module-level in `bot.py`, so it's testable) logs with traceback and tells the user the step wasn't saved. Network-level errors arrive with no update and stay silent.
+
+### 9. `save_event` could truncate an event
+
+Direct write to `event.json`. A crash or restart partway through left unparseable JSON, and every reader treats that as "no such event" — the whole event, form data included, silently gone. Now writes to `event.json.tmp`, fsyncs, and `os.replace()`s. `_event_artifacts` skips `event.json*` so a leftover temp is never offered as a document.
+
+### 10. Budget C5 was missing the phone its own label asks for
+
+The cell is labelled *"Name and phone number of the Coordinator"* and only ever received the name — `COORDINATOR_PHONE` became a separate config value and nothing joined it back. `Budget_IGNIS ‘S1.xlsx` has `C5 = "Dr. Shaik Kareemulla"`.
+
+Worth recording *how this was caught twice*: the generator fix passed a direct test (which supplies `fixed_profile()`) but the live budget PDF still showed the name alone — `budget_start` never put `coordinator_phone` into `user_data`. Only the end-to-end run exposed it. C5 now reads `Dr. Shaik Kareemulla, 99084 56052`; the signature block still shows the name alone via the existing `.split(',')[0]`, and the form is still one page.
+
+### 11. Smaller ones
+
+- Upload extensions came from the phone's filename straight into a path; now scrubbed to alphanumerics, max 8 chars (same class of bug as #1).
+- The proposal prints the typed Total Budget *and* the sum of the items, in two places, with nothing keeping them in agreement. The summary now flags a mismatch before generation.
+- `httpx` logs every `getUpdates` at INFO — that is ~99% of the 213 MB in `logs/` and what buried the PDF warnings above. Noted, not yet changed.
+
+### 12. New: Edit a field from any summary
+
+Every wizard ended on Confirm / Cancel, so one wrong date cost the entire form — for the report, that meant re-uploading every screenshot, certificate and Excel sheet. The answers are already in `user_data` at that point.
+
+`handlers/edit_fields.py` adds a generic editor, wired into all three summaries via `CONFIRM_EDIT_KB`:
+
+- **Plain fields** are asked for and stored, then the same summary is redrawn.
+- **List fields** (budget items, revenue, expenditure, schedule, winners) reuse the wizard state that already collects them; that state's Done branch calls `resume_after_edit()` and returns to the summary instead of walking the rest of the wizard. Editing revenue no longer re-asks expenditure.
+- The current value is shown in its own code block. Showing it inline invited copy-the-whole-message-and-edit — which is how `ignis_s1`'s proposal ended up with `description` starting *"Current Brief Description (2721 characters):"* and `purpose` set to the literal string `"None"`. `_strip_echo()` drops such a header if it comes back.
+- `mode` is validated against Online/Offline instead of accepting free text.
+
+Editable: proposal — name, venue, date, duration, total budget, extra, purpose, description, items. Budget — name, date, club, coordinator, emp ID, revenue, expenditure. Report — name, mode, venue, date, purpose, description, speaker bio, feedback link, schedule, winners.
+
+### 13. The "uneven sentences" in the report were the schedule, not the prose
+
+Purpose and description were already justified. The ragged block on page 8 of `Report_IGNIS ‘S1.pdf` came from two compounding bugs:
+
+1. `report_schedule` split the **whole message** on its first comma, so a pasted multi-line schedule became a single row whose "Time" was the entire paste (and it was pasted twice, giving two identical rows).
+2. That text went into the cell through `_run()`, and python-docx turns every `\n` in a run into `<w:br/>` — the documented soft-break trap, still live for table cells. Result: one cell holding a wall of soft-broken, unjustified text.
+
+**Fix** — `_cell_text()` writes one paragraph per line (same rule the body text follows) and justifies anything over 60 characters so cell edges line up with the prose sections; single-line cells keep the table's existing spacing, so tables that were already fine don't shift. `report_schedule` now takes one entry per line like the winners list, skips exact duplicates, and names unparseable lines individually.
+
+Measured on the IGNIS report: soft breaks **50 → 5** (the 5 are the template's own cover), paragraphs containing newlines **5 → 0**, long unjustified paragraphs **5 → 0**.
+
+### Verification
+
+Everything above was driven through Telegram against the service running the committed code, not just unit-tested:
+
+- Full driver (`_drive_bot.py`): proposal, budget, mail prompt, report, `/events` — 5/5, three separate runs. Its proposal now deliberately uses `LiveTest_Proposal: 2026` (colon *and* underscore) so both #1 and #5 stay covered.
+- **New** `_drive_bot_budget_yes.py`: the existing driver always answers `has_budget=No`, so the signed Budget Form, signed Event Proposal and the conditional Expenditure Statement had never been exercised end to end. That branch now has its own driver, and it also takes the Online path so the "Event Screenshots" heading gets used.
+- Edit flow: checked the *documents*, not the summaries — proposal carried the new date and `Trophies`/`1500` with no trace of `Posters`; budget carried `Sponsorship` with `Prizes` intact; report carried the rewritten purpose.
+- Formatting: re-measured on a report the **bot** produced (three long schedule lines pasted as one message) — 3 rows, 0 paragraphs with newlines, 5/5 long paragraphs justified, 2 soft breaks (template cover only).
+- Section order confirmed against the Form3 spec, including that the Signed Budget Form is appended last and unframed rather than sitting near the front.
+
+### Still open
+
+- No backup of `events/` anywhere — it holds every generated document *and* the data to regenerate them, on one machine, gitignored.
+- No way to edit a saved event after generation (the Edit step above only covers a form still in progress).
+- Dates are never validated; `24-05-20226` would reach a submitted document.
+- `temp/` grows forever; `logs/` is 213 MB, mostly httpx INFO.
+- Budget revenue copies budgeted qty/rate into actual, so actual revenue can't differ from planned. Expenditure asks for both.
+- `ALLOWED_USER_ID` hard-locks the bot to one account; storage is already per-user, only the filter blocks a handover.
+
+---
+
 ## 2026-07-27 — Budget date overflow, Budget as Word doc, stale keyboards, grouped delete, share-a-file
 
 Five things in one session, all verified against the live bot.
