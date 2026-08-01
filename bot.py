@@ -131,7 +131,9 @@ def _event_artifacts(user_id: int, slug: str) -> tuple[list[str], str]:
     folder = event_folder(user_id, slug)
     files = sorted(
         f for f in os.listdir(folder)
-        if f != 'event.json' and os.path.isfile(os.path.join(folder, f))
+        # 'event.json.tmp' is save_event's in-flight write; a crash can leave one
+        # behind and it must never be offered as a generated document.
+        if not f.startswith('event.json') and os.path.isfile(os.path.join(folder, f))
     )
     return files, folder
 
@@ -538,6 +540,25 @@ def main():
     app.add_handler(CommandHandler("cancel", idle_cancel, filters=auth_filter))
     app.add_handler(MessageHandler(auth_filter, stale_message))
     app.add_handler(CallbackQueryHandler(stale_button))
+
+    # Without this, PTB logs "No error handlers are registered" and stops: an
+    # exception anywhere in a wizard step leaves the user with no reply at all
+    # and no idea the step failed. Say so, and keep the state they were in.
+    async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+        logger.error("unhandled exception while processing an update",
+                     exc_info=context.error)
+        msg = getattr(update, 'effective_message', None) if isinstance(update, Update) else None
+        if msg is None:
+            return                      # polling/network hiccup — nobody to tell
+        try:
+            await msg.reply_text(
+                "⚠️ Something went wrong handling that. The step wasn't saved — "
+                "try it again, or send /cancel to start over."
+            )
+        except Exception:
+            logger.exception("could not deliver the error notice")
+
+    app.add_error_handler(on_error)
 
     logger.info("DAG Bot started (locked to user_id=%s)...", ALLOWED_USER_ID)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

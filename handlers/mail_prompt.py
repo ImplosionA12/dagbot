@@ -11,7 +11,7 @@ from telegram.ext import (
 
 from config import fixed_profile
 from event_store import list_events, get_event, upsert_flow
-from handlers.ui import NONE_KB, resolve_text
+from handlers.ui import NONE_KB, resolve_text, md_escape
 
 # States
 M_PICK, M_NEW_NAME, M_NEW_DATE, M_NEW_VENUE, M_NEW_DESC, \
@@ -92,7 +92,7 @@ async def mail_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['mail']['description'] = flow.get('description', '') or flow.get('purpose', '')
 
     await update.message.reply_text(
-        f"✅ Using event: *{match.get('name')}*\n\n"
+        f"✅ Using event: *{md_escape(match.get('name', ''))}*\n\n"
         f"*Target audience?*\n_(e.g. all students, club members, BCE students)_",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove()
