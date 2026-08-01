@@ -6,12 +6,34 @@ from telegram.ext import (
 
 from config import fixed_profile
 from event_store import list_events, event_status_label
-from handlers.ui import DONE_KB, NONE_KB, CONFIRM_KB, OVERFLOW_KB, resolve_text, md_escape
+from handlers.ui import (
+    DONE_KB, NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, OVERFLOW_KB, resolve_text, md_escape
+)
+from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 
 # States
 P_CLUB, P_COORD, P_EVENT, P_VENUE, P_DATE, P_DURATION, P_BUDGET, P_EXTRA, \
 P_PURPOSE, P_DESCRIPTION, P_BUDGET_ITEMS, P_CONFIRM, P_PICK, \
-P_OVERFLOW, P_EDIT_PURPOSE, P_EDIT_DESC = range(100, 116)
+P_OVERFLOW, P_EDIT_PURPOSE, P_EDIT_DESC, \
+P_EDIT_PICK, P_EDIT_VALUE = range(100, 118)
+
+_ITEMS_PROMPT = (
+    "*Budget Items* — send them again, one per message:\n"
+    "`Item Name, Qty x Rate`\n\nE.g. `Posters, 10 x 20`\n\nTap *Done* when finished."
+)
+
+PROPOSAL_EDIT_FIELDS = [
+    Field('event_name', '📛 Event name', 'Send the new event name:'),
+    Field('venue', '📍 Venue', 'Send the new venue:'),
+    Field('date', '📅 Date', 'Send the new date (DD-MM-YYYY):'),
+    Field('duration', '⏱ Duration', 'Send the new duration:'),
+    Field('total_budget', '💰 Total budget', 'Send the new total budget:'),
+    Field('extra', '🧰 Extra requirements', 'Send the new extra requirements:'),
+    Field('purpose', '📝 Purpose', 'Send the new Purpose text:'),
+    Field('description', '📄 Brief description', 'Send the new Brief Description text:'),
+    Field('budget_items', '📊 Budget items', '', restart_state=P_BUDGET_ITEMS,
+          restart_prompt=_ITEMS_PROMPT),
+]
 
 
 async def proposal_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,6 +192,7 @@ async def proposal_budget_item(update: Update, context: ContextTypes.DEFAULT_TYP
         if not context.user_data['proposal']['budget_items']:
             await update.effective_message.reply_text("⚠️ Add at least one budget item before proceeding.")
             return P_BUDGET_ITEMS
+        resume_after_edit(context)      # clear the flag; this step ends at the summary anyway
         return await _proposal_summary(update, context)
 
     try:
@@ -234,12 +257,19 @@ async def _proposal_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{_budget_mismatch_note(p.get('total_budget'), grand_total)}"
         f"Tap *Confirm* to generate documents or *Cancel* to restart."
     )
-    await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=CONFIRM_KB)
+    await update.effective_message.reply_text(summary, parse_mode="Markdown",
+                                              reply_markup=CONFIRM_EDIT_KB)
     return P_CONFIRM
+
+
+proposal_edit_menu, proposal_edit_pick, proposal_edit_value = make_edit_handlers(
+    'proposal', PROPOSAL_EDIT_FIELDS, _proposal_summary, P_EDIT_PICK, P_EDIT_VALUE)
 
 
 async def proposal_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (await resolve_text(update) or '').strip().lower()
+    if text == 'edit':
+        return await proposal_edit_menu(update, context)
     if text != 'confirm':
         await update.effective_message.reply_text("Cancelled. Send /start to begin again.")
         return ConversationHandler.END
@@ -381,4 +411,9 @@ PROPOSAL_STATES = {
     ],
     P_EDIT_PURPOSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, proposal_edit_purpose)],
     P_EDIT_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, proposal_edit_desc)],
+    P_EDIT_PICK: [
+        CallbackQueryHandler(proposal_edit_pick),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, proposal_edit_pick),
+    ],
+    P_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, proposal_edit_value)],
 }

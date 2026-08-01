@@ -6,7 +6,10 @@ from telegram.ext import (
 
 from config import fixed_profile
 from event_store import list_events
-from handlers.ui import DONE_KB, CONFIRM_KB, SKIP_KB, resolve_text, md_escape
+from handlers.ui import (
+    DONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, SKIP_KB, resolve_text, md_escape
+)
+from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 from handlers.xlsx_people import parse_people, summary
 
 # State IDs — must match bot.py
@@ -23,7 +26,33 @@ R_WINNERS, \
 R_HAS_SPEAKER, R_SPEAKER_FILES, R_SPEAKER_BIO, \
 R_HAS_FEEDBACK, R_FEEDBACK_LINK, \
 R_HAS_EXPENDITURE, R_EXPENDITURE_FILES, \
-R_CONFIRM, R_PICK = range(300, 331)
+R_CONFIRM, R_PICK, \
+R_EDIT_PICK, R_EDIT_VALUE = range(300, 333)
+
+_SCHEDULE_PROMPT = (
+    "*Detailed Schedule* — send the entries again:\n`Time, Activity`\n\n"
+    "E.g. `9:00 AM – 9:30 AM, Registration & Setup`\n\n"
+    "One per line (you can paste the whole schedule at once). Tap *Done* when finished."
+)
+_WINNERS_PROMPT = (
+    "*Winners List* — send them again:\n`Name, Registration Number`\n\n"
+    "E.g. `Dumpa Vikhil Sai, 23BCE9428`\n\nTap *Done* when finished."
+)
+
+REPORT_EDIT_FIELDS = [
+    Field('event_name', '📛 Event name', 'Send the new event name:'),
+    Field('mode', '🌐 Mode', 'Send the new mode:', choices=('Online', 'Offline')),
+    Field('venue', '📍 Venue', 'Send the new venue:'),
+    Field('date', '📅 Date', 'Send the new date (DD-MM-YYYY):'),
+    Field('purpose', '📝 Purpose', 'Send the new Purpose text:'),
+    Field('description', '📄 Brief description', 'Send the new Brief Description text:'),
+    Field('speaker_bio', '🎤 Speaker bio', 'Send the new speaker bio:'),
+    Field('feedback_link', '🔗 Feedback link', 'Send the new feedback link:'),
+    Field('schedule', '🗓 Schedule', '', restart_state=R_SCHEDULE,
+          restart_prompt=_SCHEDULE_PROMPT),
+    Field('winners', '🏆 Winners', '', restart_state=R_WINNERS,
+          restart_prompt=_WINNERS_PROMPT),
+]
 
 TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'temp')
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -392,6 +421,8 @@ async def report_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.user_data['report']['schedule']:
             await update.effective_message.reply_text("⚠️ Add at least one schedule entry.")
             return R_SCHEDULE
+        if resume_after_edit(context):
+            return await _report_summary(update, context)
         await update.effective_message.reply_text(
             "✅ Schedule saved.\n\n"
             "📌 *Section 4 — Participant List*\n\n"
@@ -400,18 +431,46 @@ async def report_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return R_PARTICIPANTS
-    try:
-        parts = text.split(',', 1)
+    # One entry per line, like the winners list. Splitting the whole message on
+    # its first comma turned a pasted multi-line schedule into a single row whose
+    # "Time" was the entire block — which then rendered as an unjustified wall of
+    # soft-broken text in the report table.
+    schedule = context.user_data['report']['schedule']
+    added, bad, dupes = [], [], 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(',', 1)
         time_slot = parts[0].strip()
-        activity = parts[1].strip()
-        context.user_data['report']['schedule'].append({'time': time_slot, 'activity': activity})
+        activity = parts[1].strip() if len(parts) > 1 else ''
+        if not time_slot or not activity:
+            bad.append(line)
+            continue
+        entry = {'time': time_slot, 'activity': activity}
+        # Sending the same block twice is a slip, not a schedule — the report it
+        # produces has the row printed twice with no way to tell them apart.
+        if entry in schedule:
+            dupes += 1
+            continue
+        schedule.append(entry)
+        added.append((time_slot, activity))
+
+    if added:
+        lines = "\n".join(f"• `{md_escape(t)}` — {md_escape(a)}" for t, a in added)
         await update.effective_message.reply_text(
-            f"✅ Added: `{time_slot}` — {activity}\n\nSend next entry or tap *Done*.",
+            f"✅ Added {len(added)} entr{'y' if len(added) == 1 else 'ies'}:\n{lines}\n\n"
+            f"Send more or tap *Done*.",
             parse_mode="Markdown", reply_markup=DONE_KB
         )
-    except Exception:
+    if dupes:
         await update.effective_message.reply_text(
-            "⚠️ Wrong format. Use:\n`Time, Activity`\nE.g. `9:00 AM – 9:30 AM, Registration & Setup`",
+            f"↩️ Skipped {dupes} entr{'y' if dupes == 1 else 'ies'} already in the schedule.")
+    if bad:
+        await update.effective_message.reply_text(
+            "⚠️ Couldn't read these — each line needs a comma between time and "
+            "activity:\n" + "\n".join(f"• {md_escape(b[:60])}" for b in bad) +
+            "\n\nUse:\n`Time, Activity`\nE.g. `9:00 AM – 9:30 AM, Registration & Setup`",
             parse_mode="Markdown"
         )
     return R_SCHEDULE
@@ -649,6 +708,8 @@ async def report_winners(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.user_data['report']['winners']:
             await update.effective_message.reply_text("⚠️ Add at least one winner.")
             return R_WINNERS
+        if resume_after_edit(context):
+            return await _report_summary(update, context)
         return await _ask_has_speaker(update)
 
     # One winner per line, so pasting a whole list at once still yields one table
@@ -885,12 +946,19 @@ async def _report_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"*Expenditure:* {len(r['expenditure_files'])} file(s)\n\n"
         f"Tap *Confirm* to generate the report or *Cancel* to restart."
     )
-    await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=CONFIRM_KB)
+    await update.effective_message.reply_text(summary, parse_mode="Markdown",
+                                              reply_markup=CONFIRM_EDIT_KB)
     return R_CONFIRM
+
+
+report_edit_menu, report_edit_pick, report_edit_value = make_edit_handlers(
+    'report', REPORT_EDIT_FIELDS, _report_summary, R_EDIT_PICK, R_EDIT_VALUE)
 
 
 async def report_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ((await resolve_text(update)) or '').strip().lower()
+    if text == 'edit':
+        return await report_edit_menu(update, context)
     if text != 'confirm':
         await update.effective_message.reply_text("Cancelled. Send /start to begin again.")
         return ConversationHandler.END
@@ -1017,4 +1085,9 @@ REPORT_STATES = {
         MessageHandler(filters.TEXT & ~filters.COMMAND, report_confirm),
         CallbackQueryHandler(report_confirm),
     ],
+    R_EDIT_PICK: [
+        CallbackQueryHandler(report_edit_pick),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, report_edit_pick),
+    ],
+    R_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_edit_value)],
 }

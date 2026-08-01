@@ -30,6 +30,11 @@ DONE_KB = _kb([("✅ Done", "done")])
 DONE_NONE_KB = _kb([("✅ Done", "done"), ("🚫 None", "none")])
 NONE_KB = _kb([("🚫 None", "None")])
 CONFIRM_KB = _kb([("✅ Confirm", "confirm"), ("❌ Cancel", "cancel")])
+# Summaries use this one: fixing a single wrong answer shouldn't cost the whole form.
+CONFIRM_EDIT_KB = _kb(
+    [("✅ Confirm", "confirm")],
+    [("✏️ Edit a field", "edit"), ("❌ Cancel", "cancel")],
+)
 SKIP_KB = _kb([("⏭ Skip", "skip")])
 OVERFLOW_KB = _kb(
     [("📤 Send anyway", "send")],

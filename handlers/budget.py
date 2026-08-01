@@ -6,10 +6,37 @@ from telegram.ext import (
 
 from config import fixed_profile
 from event_store import list_events
-from handlers.ui import DONE_KB, DONE_NONE_KB, CONFIRM_KB, resolve_text, md_escape
+from handlers.ui import (
+    DONE_KB, DONE_NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, resolve_text, md_escape
+)
+from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 
 B_CLUB, B_COORD, B_EMPID, B_EVENT, B_DATE, \
-B_REV_ITEMS, B_EXP_ITEMS, B_CONFIRM, B_PICK = range(200, 209)
+B_REV_ITEMS, B_EXP_ITEMS, B_CONFIRM, B_PICK, \
+B_EDIT_PICK, B_EDIT_VALUE = range(200, 211)
+
+_REV_PROMPT = (
+    "*Revenue Items* — send them again, one per message:\n"
+    "`Particulars, Qty, Rate`\n\nE.g. `Registration Fee, 50, 100`\n\n"
+    "Tap *None* if there's no revenue, *Done* when finished."
+)
+_EXP_PROMPT = (
+    "*Expenditure Items* — send them again, one per message:\n"
+    "`Particulars, Budget Qty, Budget Rate, Actual Qty, Actual Rate`\n\n"
+    "E.g. `Winner Cash Prize, 1, 2000, 1, 2000`\n\nTap *Done* when finished."
+)
+
+BUDGET_EDIT_FIELDS = [
+    Field('event_name', '📛 Event name', 'Send the new event name:'),
+    Field('date', '📅 Date', 'Send the new date (DD-MM-YYYY):'),
+    Field('club', '🏛 Club', 'Send the new club name:'),
+    Field('coordinator', '👤 Coordinator', 'Send the new coordinator name:'),
+    Field('emp_id', '🆔 Emp ID', 'Send the new employee ID:'),
+    Field('revenue', '💵 Revenue items', '', restart_state=B_REV_ITEMS,
+          restart_prompt=_REV_PROMPT),
+    Field('expenditure', '🧾 Expenditure items', '', restart_state=B_EXP_ITEMS,
+          restart_prompt=_EXP_PROMPT),
+]
 
 
 async def budget_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,6 +169,10 @@ async def budget_rev_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (await resolve_text(update) or '').strip()
 
     if text.lower() in ('none', 'done'):
+        # Re-entered from the summary to redo just this list — go straight back
+        # rather than marching through expenditure again.
+        if resume_after_edit(context):
+            return await _budget_summary(update, context)
         return await _exp_items_prompt(update)
 
     try:
@@ -173,6 +204,7 @@ async def budget_exp_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.user_data['budget']['expenditure']:
             await update.effective_message.reply_text("⚠️ Add at least one expenditure item.")
             return B_EXP_ITEMS
+        resume_after_edit(context)      # clear the flag; this step ends at the summary anyway
         return await _budget_summary(update, context)
 
     try:
@@ -235,12 +267,19 @@ async def _budget_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"*Surplus/Deficit (Actual):* ₹{surplus_a}\n\n"
         f"Tap *Confirm* to generate or *Cancel* to restart."
     )
-    await update.effective_message.reply_text(summary, parse_mode="Markdown", reply_markup=CONFIRM_KB)
+    await update.effective_message.reply_text(summary, parse_mode="Markdown",
+                                              reply_markup=CONFIRM_EDIT_KB)
     return B_CONFIRM
+
+
+budget_edit_menu, budget_edit_pick, budget_edit_value = make_edit_handlers(
+    'budget', BUDGET_EDIT_FIELDS, _budget_summary, B_EDIT_PICK, B_EDIT_VALUE)
 
 
 async def budget_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (await resolve_text(update) or '').strip().lower()
+    if text == 'edit':
+        return await budget_edit_menu(update, context)
     if text != 'confirm':
         await update.effective_message.reply_text("Cancelled. Send /start to begin again.")
         return ConversationHandler.END
@@ -297,4 +336,9 @@ BUDGET_STATES = {
         MessageHandler(filters.TEXT & ~filters.COMMAND, budget_confirm),
         CallbackQueryHandler(budget_confirm),
     ],
+    B_EDIT_PICK: [
+        CallbackQueryHandler(budget_edit_pick),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, budget_edit_pick),
+    ],
+    B_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, budget_edit_value)],
 }

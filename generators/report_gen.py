@@ -109,6 +109,40 @@ def _para(doc, text='', bold=False, size=12, align=None, underline=False):
     return first_p
 
 
+def _cell_text(cell, text, size=11, bold=False, align=None, justify_over=60):
+    """Write user text into a table cell without ever creating a soft break.
+
+    `run.add_run("a\\nb")` turns each newline into <w:br/>, which is how a pasted
+    multi-line block ended up in a schedule cell as one ragged, un-justified
+    lump. One paragraph per line instead — same rule the body text follows.
+
+    Anything longer than `justify_over` characters is justified so the cell's
+    right edge lines up like the prose sections; short values (times, names,
+    reg numbers) keep their natural alignment, which reads better centred.
+    """
+    lines = [ln.strip() for ln in str(text or '').replace('\r', '').split('\n')]
+    lines = [ln for ln in lines if ln] or ['']
+    cell.text = ''
+    first = cell.paragraphs[0]
+    multiline = len(lines) > 1
+    for i, line in enumerate(lines):
+        p = first if i == 0 else cell.add_paragraph()
+        if multiline:
+            # Uniform spacing across the block — leaving the first paragraph on
+            # the table's default opened a gap under line 1 that the rest of the
+            # lines didn't have. Single-line cells keep whatever the table had,
+            # so nothing shifts in the forms that were already fine.
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
+        if align is not None:
+            p.alignment = align
+        elif len(line) > justify_over:
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        if line:
+            _run(p, line, size=size, bold=bold)
+    return first
+
+
 def _apply_page_borders(doc):
     """Add a single black box border around every page (matches the cover table look).
     Done at the section properties level so all pages — cover and body — get it."""
@@ -391,12 +425,8 @@ def _add_team_person_table(doc, rows):
             if first:
                 _set_vmerge(row.cells[0], restart=True)
                 _set_vmerge(row.cells[1], restart=True)
-                p = row.cells[0].paragraphs[0]
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                _run(p, str(gi), size=11)
-                p = row.cells[1].paragraphs[0]
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                _run(p, team, size=11)
+                _cell_text(row.cells[0], str(gi), align=WD_ALIGN_PARAGRAPH.CENTER)
+                _cell_text(row.cells[1], team, align=WD_ALIGN_PARAGRAPH.CENTER)
             else:
                 _set_vmerge(row.cells[0])
                 _set_vmerge(row.cells[1])
@@ -405,15 +435,10 @@ def _add_team_person_table(doc, rows):
             row.cells[0].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
             row.cells[1].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
 
-            p = row.cells[2].paragraphs[0]
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            _run(p, person.get('slot', f"P{mi + 1}"), size=11)
-            p = row.cells[3].paragraphs[0]
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            _run(p, person.get('name', ''), size=11)
-            p = row.cells[4].paragraphs[0]
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            _run(p, person.get('reg_no', ''), size=11)
+            _cell_text(row.cells[2], person.get('slot', f"P{mi + 1}"),
+                       align=WD_ALIGN_PARAGRAPH.CENTER)
+            _cell_text(row.cells[3], person.get('name', ''), align=WD_ALIGN_PARAGRAPH.CENTER)
+            _cell_text(row.cells[4], person.get('reg_no', ''), align=WD_ALIGN_PARAGRAPH.CENTER)
             ri += 1
 
     _keep_table_together(tbl)
@@ -506,13 +531,9 @@ def _add_person_table(doc, rows):
         row = tbl.rows[j + 1]
         for c in row.cells:
             c.text = ''
-        p = row.cells[0].paragraphs[0]
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _run(p, str(j + 1), size=11)
-        _run(row.cells[1].paragraphs[0], person.get('name', ''), size=11)
-        p = row.cells[2].paragraphs[0]
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _run(p, person.get('reg_no', ''), size=11)
+        _cell_text(row.cells[0], str(j + 1), align=WD_ALIGN_PARAGRAPH.CENTER)
+        _cell_text(row.cells[1], person.get('name', ''), align=WD_ALIGN_PARAGRAPH.LEFT)
+        _cell_text(row.cells[2], person.get('reg_no', ''), align=WD_ALIGN_PARAGRAPH.CENTER)
     _keep_table_together(tbl)
     _repeat_header_row(tbl)
 
@@ -734,10 +755,8 @@ def generate_report(data: dict, output_dir: str | None = None):
             _run(p, h, bold=True, size=11)
         for j, entry in enumerate(schedule):
             row = st.rows[j + 1]
-            row.cells[0].text = ''
-            _run(row.cells[0].paragraphs[0], entry['time'], size=11)
-            row.cells[1].text = ''
-            _run(row.cells[1].paragraphs[0], entry['activity'], size=11)
+            _cell_text(row.cells[0], entry.get('time', ''), size=11)
+            _cell_text(row.cells[1], entry.get('activity', ''), size=11)
         _keep_table_together(st)
 
     # ── 3. Registered participant list ─────────────────────────────────────
