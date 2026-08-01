@@ -423,6 +423,23 @@ async def _post_init(app: Application):
     ])
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Without this, PTB logs "No error handlers are registered" and stops: an
+    exception anywhere in a wizard step leaves the user with no reply at all and
+    no idea the step failed. Say so, and leave them in the state they were in."""
+    logger.error("unhandled exception while processing an update", exc_info=context.error)
+    msg = getattr(update, 'effective_message', None) if isinstance(update, Update) else None
+    if msg is None:
+        return                          # polling/network hiccup — nobody to tell
+    try:
+        await msg.reply_text(
+            "⚠️ Something went wrong handling that. The step wasn't saved — "
+            "try it again, or send /cancel to start over."
+        )
+    except Exception:
+        logger.exception("could not deliver the error notice")
+
+
 def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -540,23 +557,6 @@ def main():
     app.add_handler(CommandHandler("cancel", idle_cancel, filters=auth_filter))
     app.add_handler(MessageHandler(auth_filter, stale_message))
     app.add_handler(CallbackQueryHandler(stale_button))
-
-    # Without this, PTB logs "No error handlers are registered" and stops: an
-    # exception anywhere in a wizard step leaves the user with no reply at all
-    # and no idea the step failed. Say so, and keep the state they were in.
-    async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-        logger.error("unhandled exception while processing an update",
-                     exc_info=context.error)
-        msg = getattr(update, 'effective_message', None) if isinstance(update, Update) else None
-        if msg is None:
-            return                      # polling/network hiccup — nobody to tell
-        try:
-            await msg.reply_text(
-                "⚠️ Something went wrong handling that. The step wasn't saved — "
-                "try it again, or send /cancel to start over."
-            )
-        except Exception:
-            logger.exception("could not deliver the error notice")
 
     app.add_error_handler(on_error)
 
