@@ -1,4 +1,6 @@
+import logging
 import os
+import re
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ContextTypes, MessageHandler, CallbackQueryHandler, filters, ConversationHandler
@@ -7,10 +9,12 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events
 from handlers.ui import (
-    DONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, SKIP_KB, resolve_text, md_escape
+    DONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, SKIP_KB, resolve_text, md_escape
 )
 from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 from handlers.xlsx_people import parse_people, summary
+
+logger = logging.getLogger(__name__)
 
 # State IDs — must match bot.py
 R_CLUB, R_COORD, R_EMPID, R_EVENT, R_MODE, R_VENUE, R_DATE, \
@@ -415,6 +419,23 @@ async def report_brochure(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ────────────────────────────────────────────────────────────────────────────
 # Section 3 — Schedule
 # ────────────────────────────────────────────────────────────────────────────
+# A schedule "Time" cell holds a clock time ("9:00 PM", "9-10 AM", "14:00").
+# Without this check any comma splits a line, so prose like "Day 1 (Saturday,
+# 19 Sep): Round 1" became a row with Time="Day 1 (Saturday".
+_TIME_RE = re.compile(r'\d{1,2}\s*:\s*\d{2}|\d{1,2}(?:\s*[-–—]\s*\d{1,2})?\s*[ap]\.?\s*m(?![a-z])', re.I)
+
+
+def _split_schedule_line(line: str):
+    """(time, activity) for a 'Time, Activity' line, or None if it isn't one."""
+    parts = line.split(',', 1)
+    if len(parts) < 2:
+        return None
+    time_slot, activity = parts[0].strip(), parts[1].strip()
+    if not activity or not _TIME_RE.search(time_slot):
+        return None
+    return time_slot, activity
+
+
 async def report_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ((await resolve_text(update)) or '').strip()
     if text.lower() == 'done':
@@ -441,12 +462,11 @@ async def report_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         line = line.strip()
         if not line:
             continue
-        parts = line.split(',', 1)
-        time_slot = parts[0].strip()
-        activity = parts[1].strip() if len(parts) > 1 else ''
-        if not time_slot or not activity:
+        split = _split_schedule_line(line)
+        if split is None:
             bad.append(line)
             continue
+        time_slot, activity = split
         entry = {'time': time_slot, 'activity': activity}
         # Sending the same block twice is a slip, not a schedule — the report it
         # produces has the row printed twice with no way to tell them apart.
@@ -468,8 +488,8 @@ async def report_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"↩️ Skipped {dupes} entr{'y' if dupes == 1 else 'ies'} already in the schedule.")
     if bad:
         await update.effective_message.reply_text(
-            "⚠️ Couldn't read these — each line needs a comma between time and "
-            "activity:\n" + "\n".join(f"• {md_escape(b[:60])}" for b in bad) +
+            "⚠️ Couldn't read these — each line must start with a time, then a comma, "
+            "then the activity:\n" + "\n".join(f"• {md_escape(b[:60])}" for b in bad) +
             "\n\nUse:\n`Time, Activity`\nE.g. `9:00 AM – 9:30 AM, Registration & Setup`",
             parse_mode="Markdown"
         )
@@ -972,12 +992,15 @@ async def report_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         docx_path, pdf_path = generate_report(context.user_data['report'], output_dir=out_dir)
         upsert_flow(update.effective_user.id, event, 'report', context.user_data['report'])
 
+        # Big reports (1.6 MB+) can outlast the default 5s upload timeout.
         with open(docx_path, 'rb') as f:
-            await update.effective_message.reply_document(f, filename=os.path.basename(docx_path))
+            await update.effective_message.reply_document(
+                f, filename=os.path.basename(docx_path), write_timeout=180, read_timeout=180)
 
         if pdf_path and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
-                await update.effective_message.reply_document(f, filename=os.path.basename(pdf_path))
+                await update.effective_message.reply_document(
+                    f, filename=os.path.basename(pdf_path), write_timeout=180, read_timeout=180)
             await update.effective_message.reply_text(
                 "✅ *Final Report generated!*\n\n"
                 "Please print, get it signed, and upload the signed version for records.\n\n"
@@ -993,7 +1016,13 @@ async def report_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Error generating report: {str(e)}\n\nSend /start to try again.")
+        logger.exception("report generation failed")
+        # Stay in R_CONFIRM so the button retries without re-entering the wizard.
+        await update.effective_message.reply_text(
+            f"❌ Error generating report: {str(e) or type(e).__name__}\n\n"
+            "Your answers are saved — tap *Generate again* to retry.",
+            parse_mode="Markdown", reply_markup=RETRY_KB)
+        return R_CONFIRM
     return ConversationHandler.END
 
 

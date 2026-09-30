@@ -7,7 +7,7 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events
 from handlers.ui import (
-    DONE_KB, DONE_NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, resolve_text, md_escape
+    DONE_KB, DONE_NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, resolve_text, md_escape
 )
 from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 
@@ -297,14 +297,14 @@ async def budget_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Filenames come from the paths themselves: the event name is sanitised
         # before it reaches disk, so re-deriving it here would drift.
         with open(xlsx_path, 'rb') as f:
-            await update.effective_message.reply_document(f, filename=os.path.basename(xlsx_path))
+            await update.effective_message.reply_document(f, filename=os.path.basename(xlsx_path), write_timeout=180, read_timeout=180)
         if docx_path and os.path.exists(docx_path):
             with open(docx_path, 'rb') as f:
-                await update.effective_message.reply_document(f, filename=os.path.basename(docx_path))
+                await update.effective_message.reply_document(f, filename=os.path.basename(docx_path), write_timeout=180, read_timeout=180)
         pdf_ok = bool(pdf_path) and os.path.exists(pdf_path)
         if pdf_ok:
             with open(pdf_path, 'rb') as f:
-                await update.effective_message.reply_document(f, filename=os.path.basename(pdf_path))
+                await update.effective_message.reply_document(f, filename=os.path.basename(pdf_path), write_timeout=180, read_timeout=180)
         await update.effective_message.reply_text(
             (f"✅ *Budget form generated!*\n\n" if pdf_ok else
              f"⚠️ *Budget form generated, but PDF conversion failed* — XLSX/DOCX only.\n\n") +
@@ -313,7 +313,10 @@ async def budget_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Error: {str(e)}\n\nSend /start to try again.")
+        await update.effective_message.reply_text(f"❌ Error generating budget form: {str(e) or type(e).__name__}\n\n"
+            "Your answers are saved — tap *Generate again* to retry.",
+            parse_mode="Markdown", reply_markup=RETRY_KB)
+        return B_CONFIRM
     return ConversationHandler.END
 
 

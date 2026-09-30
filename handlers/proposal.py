@@ -7,7 +7,7 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events, event_status_label
 from handlers.ui import (
-    DONE_KB, NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, OVERFLOW_KB, resolve_text, md_escape
+    DONE_KB, NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, OVERFLOW_KB, RETRY_KB, resolve_text, md_escape
 )
 from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 
@@ -304,8 +304,10 @@ async def _generate_proposal_docs(update: Update, context: ContextTypes.DEFAULT_
         docx_path, pdf_path = generate_proposal(p, output_dir=out_dir)
         upsert_flow(update.effective_user.id, event_name, 'proposal', p)
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Error generating proposal: {str(e)}\n\nSend /start to try again.")
-        return ConversationHandler.END
+        await update.effective_message.reply_text(f"❌ Error generating proposal: {str(e) or type(e).__name__}\n\n"
+            "Your answers are saved — tap *Generate again* to retry.",
+            parse_mode="Markdown", reply_markup=RETRY_KB)
+        return P_CONFIRM
 
     if pdf_path and os.path.exists(pdf_path):
         spill, budget_page, total = _proposal_overflow(pdf_path)
@@ -329,11 +331,11 @@ async def _send_proposal_files(update: Update, docx_path, pdf_path, event_name):
         # sanitised on the way to the filesystem, and a mismatch here is how a
         # broken path stayed invisible.
         with open(docx_path, 'rb') as f:
-            await update.effective_message.reply_document(f, filename=os.path.basename(docx_path))
+            await update.effective_message.reply_document(f, filename=os.path.basename(docx_path), write_timeout=180, read_timeout=180)
         pdf_ok = bool(pdf_path) and os.path.exists(pdf_path)
         if pdf_ok:
             with open(pdf_path, 'rb') as f:
-                await update.effective_message.reply_document(f, filename=os.path.basename(pdf_path))
+                await update.effective_message.reply_document(f, filename=os.path.basename(pdf_path), write_timeout=180, read_timeout=180)
         await update.effective_message.reply_text(
             (f"✅ *Proposal generated successfully!*\n\n" if pdf_ok else
              f"⚠️ *Proposal generated, but PDF conversion failed* — DOCX only.\n\n") +
@@ -342,7 +344,10 @@ async def _send_proposal_files(update: Update, docx_path, pdf_path, event_name):
             parse_mode="Markdown"
         )
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Error generating proposal: {str(e)}\n\nSend /start to try again.")
+        await update.effective_message.reply_text(f"❌ Error sending the proposal: {str(e) or type(e).__name__}\n\n"
+            "Your answers are saved — tap *Generate again* to retry.",
+            parse_mode="Markdown", reply_markup=RETRY_KB)
+        return P_CONFIRM
     return ConversationHandler.END
 
 

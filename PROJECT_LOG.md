@@ -4,6 +4,95 @@ Running log of changes made to the DAGBot codebase. Newest entries on top.
 
 ---
 
+## 2026-09-30 — Page-border overflow, stranded headings, schedule parsing, timeout retry, Back button, Edit & regenerate
+
+Started from three screenshots of a real report (`Report_Wipe_Out_Arena_Reloaded.docx`, 846 participants) and a Telegram "Timed out" error, and grew into a step-back feature and an edit-after-generation path. Every fix below was checked in the live bot (`@DAGClubDocBot`, driven through `dag_user.session`); the layout fixes were also checked inside real Word via COM.
+
+### 1. Page border cut through table rows and text (report)
+
+**Symptom:** the black page frame ran through the last row on a page ("772 J. ROHIT SHREE SAI") and through a line of body text ("Purpose of the Event").
+
+**Root cause:** `_apply_page_borders` draws the frame 24 pt in from the page edge (`offsetFrom="page"`, `space=24`), but the template's bottom margin is 360 twips = 18 pt. Text could run 6 pt *past* the frame. Top/left/right margins (45/45/36 pt) were fine; only the bottom was short.
+
+**Fix (`generators/report_gen.py` → `_apply_page_borders`):** raise the section's bottom margin to at least 720 twips (0.5"). Also moved `<w:pgBorders>` to sit right after `<w:pgMar>` (schema order) instead of the end of `<w:sectPr>`.
+
+**Verified:** rendered PDF, lowest text on a full page is y=734 pt against a frame at about 768 pt.
+
+### 2. Heading stranded at the foot of a page, table on the next
+
+**Symptom:** "3. Registered participant list" + "Total registered: 846" sat alone at the bottom of a page; pressing space pushed them onto the next page *with* the table.
+
+**Root cause:** in `_person_section`'s long-list branch (more than 25 rows, written at body level so the header row can repeat), the heading and the blank under it carried `keepNext`, but the **"Total registered" line and the blank paragraph after it did not**. The chain heading, blank, total, blank, table was broken in the middle, so Word was free to break there.
+
+**Fix:** `_set_keep_with_next` on the total line and the trailing blank paragraph.
+
+**Verified in real Word (COM):** heading, total line, header row and first data row all land on the same page as generated, and stay together after inserting 1 / 3 / 10 / 25 / 40 spaces or 1 / 5 / 15 / 30 blank paragraphs in front of the heading (the whole block just moves to the next page as one unit). No non-breaking spaces or stray `<w:br>` in the document.
+
+### 3. Schedule table came out as garbage
+
+**Symptom:** rows like `Time = "Day 1 (Saturday"`, `Activity = "19 Sep): Round 1"`.
+
+**Root cause:** the handler split *every* line at its first comma, so any prose line pasted into the schedule step became a row split mid-sentence.
+
+**Fix (`handlers/report.py`):** `_split_schedule_line`. A comma only splits a line when the left side is a clock time (`9:00 PM`, `9:00 AM – 9:30 AM`, `9-10 AM`, `14:00`). Lines that aren't `Time, Activity` are rejected and listed back to the user with the expected format; the good lines in the same message are still added.
+
+**Verified live:** a pasted block of 2 prose lines + 3 timed lines added the 3 timed rows and reported the 2 prose lines.
+
+### 4. "Error generating report: Timed out" now offers a retry button
+
+**Root cause of the timeout:** Telegram's default upload timeout (5 s write) on a 1.6 MB DOCX. The file actually arrived, but the exception aborted the handler and told the user to `/start` over.
+
+**Fix:**
+- `reply_document(..., write_timeout=180, read_timeout=180)` on every generated-file send in `report.py`, `proposal.py`, `budget.py`.
+- New `RETRY_KB` (`handlers/ui.py`): 🔄 Generate again, ✏️ Edit a field, ❌ Cancel. On any generation/send failure the report, proposal and budget confirm handlers now return to their **confirm state** (`R_CONFIRM` / `P_CONFIRM` / `B_CONFIRM`) with that keyboard, so the answers are kept and one tap retries. The exception is logged with a traceback (`logger.exception`).
+- Bug caught while testing this: I had added `logger.exception(...)` to `report.py` without defining `logger`, so the retry message would never have been sent. Added `import logging` + `logger`. (Retry path checked with a mocked `TimedOut`: state stays `R_CONFIRM`, buttons present, second attempt succeeds and ends the conversation.)
+
+### 5. ⬅️ Back: step back through a wizard without starting over
+
+New module **`handlers/back.py`**; no wizard handler was edited to support it.
+
+- `track(handler)` wraps every wizard state handler. When a handler moves the conversation to a new state it pushes a checkpoint: state, deep snapshot of `user_data` on arrival, and the prompt that was shown. Entry points wrap with `reset=True` (empty history per flow).
+- Back **keeps everything answered up to the step you return to** and discards only the answer to the step you leave, so going back into a list step (schedule, winners, budget items) keeps its items and you just add more or tap Done. Control flags (`_edit_*`) come from the returned-to step's arrival snapshot.
+- **Buttons, not commands:** every prompt gets a Back button.
+  - Plain / inline-keyboard prompts: an inline `⬅️ Back` (added by editing the message after the transition).
+  - Reply-keyboard prompts (Online/Offline, Yes/No, event picker): Telegram refuses to edit an inline button onto a message carrying a reply keyboard ("Message can't be edited"), so `decorate_markup()` (called from `MarkdownSafeBot.send_message`) adds a `⬅️ Back` key row at send time. A wizard's `ReplyKeyboardRemove` becomes a keyboard holding only Back so *that* step has a tap too; `KB_HAS_BACK` tracks whether the Back key is on screen so inline duplicates are skipped.
+  - When a wizard ends with the Back key still showing, the bot sends "🏠 What next?" with the main-menu buttons (`MAIN_MENU_ROWS`, now shared with `/start`) so the next move is a tap, not `/start`.
+  - `/back` still works, `/back` when idle answers politely, and it is in the command menu.
+- Back handlers are inserted **first** in every wizard state (several states take any text or any callback, which would otherwise swallow them).
+- State lives in `user_data['_back_hist']` (at most 60 checkpoints), so it survives restarts via PicklePersistence.
+- `MarkdownSafeBot` can't take new attributes (PTB freezes bot objects; my first attempt crashed the service at startup with `AttributeError: Attribute 'last_sent' ... can't be set`), so the "last message sent per chat" record is the module-level `LAST_SENT` in `handlers/back.py`.
+
+**Verified live:** Back on reply-keyboard steps, inline steps and plain steps; Back after a **service restart** mid-wizard; `/back` when idle; and a fuzz driver (`_drive_bot_back_fuzz.py`) that runs the whole suite tapping Back and repeating the answer on every 3rd one-answer step. The resulting documents match a normal run in size (`Report_…docx` 78,012–78,013 bytes, `.pdf` 191,187).
+
+### 6. ✏️ Edit & regenerate: fix a saved document without touching Word
+
+**Complaint:** a typo in one document meant downloading it, editing the Word file by hand and re-exporting a PDF.
+
+**Change (`bot.py`):** My Events → event → **✏️ Edit & regenerate** (only shown when the event has a saved proposal/budget/report) → pick the document → its saved answers load into `user_data[flow]` and open on the normal **summary screen**. The existing *Edit a field* menu and *Confirm* then regenerate the DOCX/PDF (new state `EVENTS_REGEN = 84`; each flow's own `*_summary` and confirm state are reused). Uploaded image/Excel paths in the saved data still exist under `temp/`, so nothing needs re-uploading.
+
+**Verified live (buttons only):** open event → Edit & regenerate → Event Proposal → Edit a field → Venue → new value → Confirm → new DOCX + PDF delivered.
+
+### 7. Housekeeping and gotchas learned
+
+- `/events` is now an entry with `reset=True`, so leftover Back history from an abandoned wizard can't leak into it.
+- **Telegram flood limit** hits the live drivers hard: back-to-back suite runs produced stale replies and false failures (Budget / Mail / `/events`). The same code passed after a ~4-minute cooldown. Don't read a red suite right after another run as a bot bug.
+- `_drive_bot.py` `test_events_listing` now drains straggler replies after `/cancel`: a finished wizard ends with the extra "🏠 What next?" message, which otherwise shifts the driver's reply counting by one. Final state: plain suite 5/5 and the Back-fuzz suite 5/5 (after cooldown).
+- Test events created by the drivers (`LiveTest*`) must be removed from `events/5422521708/` after a run (`rm -rf events/5422521708/livetest_*`); the real events (`battle_for_glory`, `explore_the_world`, `ignis_s1`, `pixelhack_2_0`, `wipe_out_arena_reloaded`) were not touched.
+- The budget date step accepts any text (a pasted line item became the date in one fuzz run). Pre-existing and not validated; worth a follow-up.
+- One layout detail I could not settle from the screenshots: a large blank area above "5. Brief description" on the page after a long participant table. The document XML contains only a normal spacer paragraph there; re-check on a fresh report.
+
+### Files touched
+
+- `generators/report_gen.py`: bottom margin + pgBorders order (§1), keep-with-next on total line/blank (§2)
+- `handlers/report.py`: schedule line parsing (§3), retry + write timeouts + logger (§4)
+- `handlers/proposal.py`, `handlers/budget.py`: retry + write timeouts (§4)
+- `handlers/ui.py`: `RETRY_KB`, `MAIN_MENU_ROWS`
+- `handlers/back.py`: **new** (§5)
+- `bot.py`: `LAST_SENT` capture + reply-keyboard Back injection in `MarkdownSafeBot.send_message`, tracked entry points and states, `/back` command + idle handler, main-menu "What next?", Edit & regenerate (§6)
+- `_drive_bot_fixes.py`, `_drive_bot_back.py`, `_drive_bot_back2.py`, `_drive_bot_back_fuzz.py`, `_drive_bot_back_persist.py`, `_drive_bot_regen.py`: **new** live drivers for the above
+
+---
+
 ## 2026-08-01/02 — Repo created; the missing-PDF bug and a full audit; Edit step; report justification
 
 Started from one user report ("only doc?" — a proposal arrived as DOCX with no PDF) and ran to a full pass over the codebase. Everything below was reproduced before being fixed and verified against the live bot after.

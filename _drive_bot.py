@@ -336,6 +336,9 @@ async def test_events_listing(chat):
     # /cancel always answers now (a conversation fallback when one is running,
     # an "idle" reply otherwise) — consume it so replies don't shift by one.
     await chat.send('/cancel', timeout=8)
+    # A finished wizard now ends with a "What next?" menu message that can land
+    # after the last document — drain stragglers so /events reads its own reply.
+    await chat.collect_bot_replies(expected=5, timeout=3)
     await asyncio.sleep(0.5)
     r = await chat.send('/events', timeout=8)
     if r and r.text:

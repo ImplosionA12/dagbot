@@ -19,6 +19,14 @@ def md_escape(s: str) -> str:
     return re.sub(r'([_*`\[])', r'\\\1', s or '')
 
 
+# Main-menu reply keyboard, shared by /start and the end of every wizard.
+MAIN_MENU_ROWS = [
+    ["📄 Event Proposal", "💰 Budget Form"],
+    ["📋 Final Event Report"],
+    ["📧 Mail Prompt", "📂 My Events"],
+]
+
+
 def _kb(*rows):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(label, callback_data=data) for label, data in row]
@@ -35,7 +43,12 @@ CONFIRM_EDIT_KB = _kb(
     [("✅ Confirm", "confirm")],
     [("✏️ Edit a field", "edit"), ("❌ Cancel", "cancel")],
 )
-SKIP_KB = _kb([("⏭ Skip", "skip")])
+# Shown when generation/upload fails: "confirm" re-enters the confirm step.
+RETRY_KB = _kb(
+    [("🔄 Generate again", "confirm")],
+    [("✏️ Edit a field", "edit"), ("❌ Cancel", "cancel")],
+)
+SKIP_KB =_kb([("⏭ Skip", "skip")])
 OVERFLOW_KB = _kb(
     [("📤 Send anyway", "send")],
     [("✏️ Shorten purpose", "edit_purpose"), ("✏️ Shorten description", "edit_desc")],

@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 
 from config import fixed_profile, ALLOWED_USER_ID
 from event_store import list_events, get_event, delete_event, event_status_label, event_folder
-from handlers.ui import resolve_text, md_escape
+from handlers.ui import resolve_text, md_escape, MAIN_MENU_ROWS
+from handlers.back import track, back_handlers, decorate_markup, LAST_SENT
 
 
 class MarkdownSafeBot(ExtBot):
@@ -30,13 +31,26 @@ class MarkdownSafeBot(ExtBot):
     """
 
     async def send_message(self, *args, **kwargs):
+        if kwargs.get('reply_markup') is not None:
+            kwargs['reply_markup'] = decorate_markup(
+                kwargs['reply_markup'], kwargs.get('chat_id', args[0] if args else None))
         try:
-            return await super().send_message(*args, **kwargs)
+            msg = await super().send_message(*args, **kwargs)
         except BadRequest as e:
             if kwargs.get('parse_mode') is None or "can't parse entities" not in str(e).lower():
                 raise
             logger.warning(f"markdown rejected, resending as plain text: {e}")
-            return await super().send_message(*args, **{**kwargs, 'parse_mode': None})
+            msg = await super().send_message(*args, **{**kwargs, 'parse_mode': None})
+        try:
+            text = kwargs.get('text', args[1] if len(args) > 1 else None)
+            # handlers.back.track() reads this to learn which prompt a step ended on.
+            LAST_SENT[msg.chat_id] = {
+                'text': text, 'parse_mode': kwargs.get('parse_mode'),
+                'reply_markup': kwargs.get('reply_markup'), 'message_id': msg.message_id,
+            }
+        except Exception:
+            pass
+        return msg
 
 load_dotenv()
 
@@ -52,6 +66,7 @@ MAIN_MENU = 0
 
 # Events viewer
 EVENTS_MENU, EVENTS_DETAIL, EVENTS_FILES, EVENTS_DELETE = range(80, 84)
+EVENTS_REGEN = 84
 
 # Proposal states
 P_CLUB, P_COORD, P_EVENT, P_VENUE, P_DATE, P_DURATION, P_BUDGET, P_EXTRA, \
@@ -77,6 +92,9 @@ R_HAS_FEEDBACK, R_FEEDBACK_FILES, \
 R_HAS_EXPENDITURE, R_EXPENDITURE_FILES, \
 R_CONFIRM = range(300, 330)
 
+from handlers.proposal import _proposal_summary, P_CONFIRM as P_CONFIRM_STATE
+from handlers.budget import _budget_summary, B_CONFIRM as B_CONFIRM_STATE
+from handlers.report import _report_summary, R_CONFIRM as R_CONFIRM_STATE
 from handlers.proposal import (
     proposal_start,
     proposal_club, proposal_coord, proposal_event, proposal_venue,
@@ -108,11 +126,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _show_main_menu(update: Update):
     profile = fixed_profile()
-    keyboard = [
-        ["📄 Event Proposal", "💰 Budget Form"],
-        ["📋 Final Event Report"],
-        ["📧 Mail Prompt", "📂 My Events"],
-    ]
+    keyboard = MAIN_MENU_ROWS
     await update.effective_message.reply_text(
         f"👋 *DAG Club Documentation Bot*\n\n"
         f"🏛 *Club:* {profile['club']}\n"
@@ -230,6 +244,7 @@ async def _show_event_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     keyboard = [
         ["📥 Download files"],
+        *([["✏️ Edit & regenerate"]] if (has_proposal or has_budget or has_report) else []),
         ["🗑 Delete a file", "🗑 Delete this event"],
         ["⬅️ Back to events"],
     ]
@@ -310,6 +325,9 @@ async def events_detail_choice(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text(f"⚠️ Could not send {fn}: {e}")
         return await _show_event_detail(update, context)
 
+    if "Edit & regenerate" in text:
+        return await _regen_menu(update, context)
+
     if "Delete a file" in text:
         artifacts, _ = _event_artifacts(user_id, slug)
         if not artifacts:
@@ -339,6 +357,55 @@ async def events_detail_choice(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await update.message.reply_text("Please pick an option.")
     return EVENTS_DETAIL
+
+
+_REGEN_FLOWS = (
+    ('proposal', '📄 Event Proposal'),
+    ('budget', '💰 Budget Form'),
+    ('report', '📋 Final Event Report'),
+)
+
+
+async def _regen_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pick which saved document of this event to edit and regenerate."""
+    match = get_event(update.effective_user.id, context.user_data.get('_event_slug', ''))
+    have = [(k, label) for k, label in _REGEN_FLOWS if match and match.get(k)]
+    if not have:
+        await update.effective_message.reply_text("Nothing saved to edit for this event yet.")
+        return EVENTS_DETAIL
+    rows = [[InlineKeyboardButton(label, callback_data=f"regen:{k}")] for k, label in have]
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="regen:back")])
+    await update.effective_message.reply_text(
+        "✏️ *Which document?*" + chr(10)*2 + "Its saved answers open on the summary screen — fix "
+        "whatever is wrong with *Edit a field*, then *Confirm* to regenerate the Word "
+        "and PDF. No need to edit the file by hand.",
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+    return EVENTS_REGEN
+
+
+async def events_regen_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import copy
+    text = (await resolve_text(update) or '').strip()
+    if not text.startswith('regen:') or text == 'regen:back':
+        return await _show_event_detail(update, context)
+
+    flow = text.split(':', 1)[1]
+    match = get_event(update.effective_user.id, context.user_data.get('_event_slug', ''))
+    data = (match or {}).get(flow)
+    if flow not in dict(_REGEN_FLOWS) or not data:
+        await update.effective_message.reply_text("⚠️ That document isn't saved any more.")
+        return await _show_event_detail(update, context)
+
+    # Same shape the wizard keeps while running, so its summary, Edit menu and
+    # Confirm work unchanged.
+    context.user_data['type'] = flow
+    context.user_data[flow] = copy.deepcopy(data)
+    summary_fn, confirm_state = {
+        'proposal': (_proposal_summary, P_CONFIRM_STATE),
+        'budget': (_budget_summary, B_CONFIRM_STATE),
+        'report': (_report_summary, R_CONFIRM_STATE),
+    }[flow]
+    return await summary_fn(update, context)
 
 
 async def events_file_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -419,6 +486,7 @@ async def _post_init(app: Application):
         BotCommand("report", "New Final Event Report"),
         BotCommand("mail", "Generate a mail prompt"),
         BotCommand("events", "View saved events"),
+        BotCommand("back", "Go back one step"),
         BotCommand("cancel", "Cancel the current flow"),
     ])
 
@@ -469,19 +537,28 @@ def main():
         "📧 Mail Prompt", "📂 My Events",
     ))
 
+    # /back support: wizard steps become checkpoints; entry points reset them.
+    wizard_states = {**PROPOSAL_STATES, **BUDGET_STATES, **REPORT_STATES, **MAIL_STATES}
+    for handlers_ in wizard_states.values():
+        for h in handlers_:
+            if not getattr(h.callback, '_tracked', False):
+                h.callback = track(h.callback)
+    wizard_states = {st: back_handlers(auth_filter) + list(hs)
+                     for st, hs in wizard_states.items()}
+
     conv_handler = ConversationHandler(
         entry_points=[
-            CommandHandler("start", start, filters=auth_filter),
-            CommandHandler("events", events_cmd, filters=auth_filter),
-            CommandHandler("proposal", proposal_start, filters=auth_filter),
-            CommandHandler("budget", budget_start, filters=auth_filter),
-            CommandHandler("report", report_start, filters=auth_filter),
-            CommandHandler("mail", mail_start, filters=auth_filter),
+            CommandHandler("start", track(start, reset=True), filters=auth_filter),
+            CommandHandler("events", track(events_cmd, reset=True), filters=auth_filter),
+            CommandHandler("proposal", track(proposal_start, reset=True), filters=auth_filter),
+            CommandHandler("budget", track(budget_start, reset=True), filters=auth_filter),
+            CommandHandler("report", track(report_start, reset=True), filters=auth_filter),
+            CommandHandler("mail", track(mail_start, reset=True), filters=auth_filter),
             MessageHandler(filters.Regex(rf"^({menu_labels})$") & auth_filter,
-                           main_menu_choice),
+                           track(main_menu_choice, reset=True)),
         ],
         states={
-            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_choice)],
+            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, track(main_menu_choice))],
             EVENTS_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, events_menu_choice)],
             EVENTS_DETAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, events_detail_choice)],
             EVENTS_FILES: [
@@ -492,10 +569,11 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, events_delete_event),
                 CallbackQueryHandler(events_delete_event),
             ],
-            **PROPOSAL_STATES,
-            **BUDGET_STATES,
-            **REPORT_STATES,
-            **MAIL_STATES,
+            EVENTS_REGEN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, track(events_regen_pick)),
+                CallbackQueryHandler(track(events_regen_pick)),
+            ],
+            **wizard_states,
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
@@ -554,7 +632,12 @@ def main():
             reply_markup=ReplyKeyboardRemove()
         )
 
+    async def idle_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.effective_message.reply_text(
+            "Nothing to go back to. Send /start to begin.")
+
     app.add_handler(CommandHandler("cancel", idle_cancel, filters=auth_filter))
+    app.add_handler(CommandHandler("back", idle_back, filters=auth_filter))
     app.add_handler(MessageHandler(auth_filter, stale_message))
     app.add_handler(CallbackQueryHandler(stale_button))
 
