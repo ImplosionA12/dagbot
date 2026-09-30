@@ -535,6 +535,10 @@ def _add_person_table(doc, rows):
     tbl.style = 'Table Grid'
     tbl.autofit = False
     widths = [Inches(0.6), Inches(3.4), Inches(2.5)]
+    # tblGrid as well as tcW: Word follows the cell widths, but LibreOffice (the
+    # PDF fallback) follows the grid, which python-docx leaves as three equal columns.
+    for ci, col in enumerate(tbl.columns):
+        col.width = widths[ci]
     for row in tbl.rows:
         for ci, cell in enumerate(row.cells):
             cell.width = widths[ci]
