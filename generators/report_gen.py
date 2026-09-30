@@ -159,7 +159,19 @@ def _apply_page_borders(doc):
         b.set(qn('w:space'), '24')   # offset from page edge
         b.set(qn('w:color'), '000000')
         pgBorders.append(b)
-    sectPr.append(pgBorders)
+    # w:pgBorders belongs right after w:pgMar in the schema; at the end Word may
+    # ignore it.
+    pgMar = sectPr.find(qn('w:pgMar'))
+    if pgMar is not None:
+        pgMar.addnext(pgBorders)
+    else:
+        sectPr.append(pgBorders)
+    # The border sits 24pt in from the page edge. The template's 0.25" (18pt)
+    # bottom margin lets table rows run past it, so the frame cuts through the
+    # last row of a page. Keep the text clear of the line.
+    section = doc.sections[0]
+    if section.bottom_margin is None or section.bottom_margin < Twips(720):
+        section.bottom_margin = Twips(720)
 
 
 def _append_borderless_section(doc):
@@ -465,8 +477,11 @@ def _person_section(doc, number, title, label, rows):
     stops a small section being split from its heading."""
     if len(rows) + 1 > _LONG_TABLE_ROWS:
         _section_heading(doc, number, title)
-        _para(doc, _people_total(label, rows), size=12)
-        doc.add_paragraph()
+        # The headcount line and the blank under it must ride with the table's
+        # header row, or the heading strands at the foot of a page while the
+        # table starts on the next one.
+        _set_keep_with_next(_para(doc, _people_total(label, rows), size=12))
+        _set_keep_with_next(doc.add_paragraph())
         _add_person_table(doc, rows)
         spacer = doc.add_paragraph()
         spacer.paragraph_format.space_after = Pt(SECTION_SPACER_PT)
