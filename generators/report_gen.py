@@ -476,7 +476,9 @@ def _person_section(doc, number, title, label, rows):
     page and none of the five after it. Short lists keep the wrapper, which
     stops a small section being split from its heading."""
     if len(rows) + 1 > _LONG_TABLE_ROWS:
-        _section_heading(doc, number, title)
+        # A long list gets its own page: it's the biggest block in the report, and
+        # starting it mid-page left a tall blank gap above it in Word.
+        _section_heading(doc, number, title).paragraph_format.page_break_before = True
         # The headcount line and the blank under it must ride with the table's
         # header row, or the heading strands at the foot of a page while the
         # table starts on the next one.
