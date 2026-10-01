@@ -260,6 +260,15 @@ def _set_keep_with_next(paragraph):
     paragraph.paragraph_format.keep_together = True
 
 
+def _keep_short_prose(paragraph, max_chars=700):
+    """Keep a short paragraph whole on one page. Otherwise a heading chained to it
+    stays at the foot of a page with two lines under it, and the user pads it
+    down with Enter, leaving a blank gap. Long text still flows across pages."""
+    if len(paragraph.text) <= max_chars:
+        paragraph.paragraph_format.keep_together = True
+    return paragraph
+
+
 def _section_heading(doc, number, title):
     """Section heading used in the document body (not inside a cell)."""
     p = doc.add_paragraph()
@@ -800,11 +809,11 @@ def generate_report(data: dict, output_dir: str | None = None):
     _section_heading(doc, 5, 'Brief description of the event')
     p = _para(doc, 'Purpose of the Event:', bold=True, size=12)
     _set_keep_with_next(p)
-    _para(doc, data.get('purpose', ''), align=WD_ALIGN_PARAGRAPH.JUSTIFY)
+    _keep_short_prose(_para(doc, data.get('purpose', ''), align=WD_ALIGN_PARAGRAPH.JUSTIFY))
     doc.add_paragraph()
     p = _para(doc, 'Brief Description:', bold=True, size=12)
     _set_keep_with_next(p)
-    _para(doc, data.get('description', ''), align=WD_ALIGN_PARAGRAPH.JUSTIFY)
+    _keep_short_prose(_para(doc, data.get('description', ''), align=WD_ALIGN_PARAGRAPH.JUSTIFY))
     spacer = doc.add_paragraph()
     spacer.paragraph_format.space_after = Pt(SECTION_SPACER_PT)
 
