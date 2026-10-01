@@ -4,6 +4,88 @@ Running log of changes made to the DAGBot codebase. Newest entries on top.
 
 ---
 
+## 2026-10-01/02 — Section 5 gap explained, date mismatch prompt, date validation, summary-step guard, token out of logs, generation off the event loop
+
+Started from two screenshots of the real Wipe Out Arena report: a blank gap above "5. Brief description" when the user tried to push it to the next page. That closed both open items from the previous entry (the gap, and the unvalidated budget date) and turned up a run of smaller bugs. Everything was checked through the live bot (`_drive_bot.py`, now 7 tests, all passing) and the layout in both Word (COM) and LibreOffice, which is what the service actually uses for PDFs (it runs in session 0).
+
+Commits: `1ecbb7f`, `ec0e674`, `30b807e`, `fe3abac`, `28ea6ae`.
+
+### 1. The gap above "5. Brief description" (report)
+
+**Symptom:** pushing the heading down with Enter left a block of blank lines at the *top* of the next page, above the heading.
+
+**Root cause (reproduced in Word via COM):** the heading carries `keepNext` + `keepLines` so it never strands from its text. Pressing Enter at the start of a paragraph creates new paragraphs that *copy its properties*, so every blank line also has `keepNext` and the whole chain moves to the next page together. 8 Enters moved the heading to page 40 at y=263 instead of the top. Moving keep-with-next into a paragraph style made no difference; Word's own Heading styles behave the same. Ctrl+Enter (page break) puts it at the top cleanly (y=46).
+
+**Fix (`generators/report_gen.py`):**
+- After a long person list (more than `_LONG_TABLE_ROWS`, which already starts on its own page), section 5's heading gets `page_break_before`, so it starts a fresh page by itself.
+- `_keep_short_prose()`: Purpose / Brief Description paragraphs of 700 characters or fewer are `keep_together`, so the heading chained to them moves as a unit instead of sitting at a page foot over two lines. Longer text still flows.
+
+**Verified:** the real 846-participant report puts section 5 at the top of page 40, directly after row 846, in both Word and LibreOffice renders.
+
+### 2. Report date ≠ Budget/Proposal date was never noticed
+
+**Symptom:** the saved event had Proposal and Budget dated `08-08-2026 & 09-08-2026`, but the Report dated `19-09-2026 , 20-09-2026 & 21-09-2026`. The report went out with an attached budget form still showing August.
+
+**Fix (`handlers/report.py`):** on Confirm, `_date_conflicts()` compares the report date with the saved Budget and Proposal (whitespace-insensitive). On a mismatch the bot stops and asks, with buttons:
+- **Use <report date> everywhere:** regenerates Budget (xlsx/docx/pdf) and Proposal with the report date, saves them to the event, sends them, and re-dates the attached Word copies in place (`_replace_in_docx`: only the matching runs' text changes, so signatures and pasted images survive). Covers `signed_budget_files`, `signed_proposal_files` **and `expenditure_files`**. The first version missed the expenditure statement, which in the real event was the same budget file, so page 44 still showed August; fixed in `28ea6ae`. Scans/PDFs can't be re-dated, and the bot says so.
+- **Use <budget date> in the report**, or **Keep both as they are**.
+
+The choice is remembered (`_date_ok` in the saved report data), so a later regenerate with the same date doesn't ask again. `report_confirm`'s generation moved into `_generate_report_docs()`.
+
+**Applied to the real event** (on request, backup of the folder taken first): Report, Budget and Proposal all now dated `19-09-2026, 20-09-2026 & 21-09-2026`. No August date in any page's text; picture pages 44/45 checked visually; against the previous report only pages 2, 44 and 45 differ.
+
+### 3. Dates are now validated and tidied
+
+`handlers/ui.py: parse_event_date()` accepts one date, a list, or a range in loose formats and returns one spelling: `1-9-26` → `01-09-2026`; `19-09-2026 , 20-09-2026 & 21-09-2026` → `19-09-2026, 20-09-2026 & 21-09-2026`; `25/07/2026 - 27/07/2026` → `25-07-2026 to 27-07-2026`. Impossible or non-date input (`31-02-2026`, `9/9`, `tomorrow`, `24-05-2026 evening`) is re-asked with `DATE_HELP`. Wired into the date step of all four flows and into *Edit a field → Date* (new `Field.validate` + `date_field()` in `handlers/edit_fields.py`).
+
+### 4. One stray word at the summary threw away the whole form
+
+**Root cause:** every confirm handler treated anything other than `confirm` as Cancel and ended the conversation. Answers are only saved on Confirm, so a typed "ok" lost every answer and upload.
+
+**Fix:** `confirm_intent()` / `confirm_not_understood()` in `handlers/ui.py`, used by the proposal, budget and report confirm steps. Only Cancel cancels; `ok`/`yes`/`generate` count as Confirm; anything else re-shows the summary buttons and keeps the form.
+
+### 5. Bot token was in the logs, 515,020 times
+
+httpx logs every request URL at INFO, and Telegram URLs carry the token. `logging.getLogger('httpx').setLevel(WARNING)` in `bot.py`, and the existing `logs/*.log` were scrubbed (service stopped, token replaced with `<BOT_TOKEN>`, restarted). Logs are git-ignored, so nothing leaked publicly.
+
+### 6. Document generation no longer blocks the bot
+
+**Root cause:** generators (Word/Excel COM or LibreOffice, 5–60 s) ran on the event loop; the bot answered nothing meanwhile, not even `/cancel`.
+
+**Fix: new `handlers/busy.py`.**
+- `run_generator()` runs a generator in a worker thread with `pythoncom.CoInitialize()` and a global Office lock (Word/Excel are single COM servers). All five generator calls now go through it.
+- `PerUserUpdateProcessor` (`.concurrent_updates(...)` in `bot.py`): one user's updates still run strictly in order (the wizard states depend on it); different users run in parallel. A message from a user whose document is building skips the queue and gets "⏳ Still generating your document…", without touching the wizard.
+
+**Verified:** Word conversion works from the worker thread (budget 5 s, the 45-page report 24 s with the loop ticking), and live: "hello?" sent mid-generation got the busy reply, then the files arrived.
+
+### 7. Stray backslashes in names
+
+`md_escape()` only works *outside* a Markdown entity; inside `*…*` Telegram shows the backslash (`/events` listed `LiveTest\_Proposal: 2026`). New `md_wrap(text, mark)` uses Telegram's close-escape-reopen form; every in-entity call site was switched (16 bold/code, 2 italic) across `bot.py` and the handlers.
+
+### 8. Live test driver
+
+`_drive_bot.py` now runs 7 tests:
+- **TEST 6:** report dated differently from an existing budget, with an old-dated Word budget attached as both the signed budget and the expenditure statement. It taps "everywhere" via `request_callback_answer` and checks the saved budget date and both re-dated attachments.
+- **TEST 7:** bad date re-asked, loose range tidied, stray word at summary keeps the form, "ok" confirms, busy reply mid-generation.
+
+### Files touched
+
+- `generators/report_gen.py`: section 5 page break after long lists, `_keep_short_prose` (§1)
+- `handlers/report.py`: date-mismatch prompt, `_replace_in_docx`, `_generate_report_docs`, confirm guard, date validation, `run_generator` (§2–4, §6)
+- `handlers/ui.py`: `md_wrap`, `parse_event_date`, `DATE_HELP`, `confirm_intent`, `confirm_not_understood` (§3, §4, §7)
+- `handlers/busy.py`: **new** (§6)
+- `handlers/edit_fields.py`: `Field.validate`, `date_field()` (§3)
+- `handlers/proposal.py`, `handlers/budget.py`, `handlers/mail_prompt.py`: date validation, confirm guard, `run_generator`, `md_wrap` (§3, §4, §6, §7)
+- `bot.py`: httpx log level, `PerUserUpdateProcessor`, `md_wrap` (§5–7)
+- `_drive_bot.py`: TEST 6, TEST 7 (§8)
+
+### Still open
+
+- Pressing Enter in front of *any* keep-with-next heading in Word still carries the blank lines along (it's Word behaviour). Section 5 is handled; other headings rely on Ctrl+Enter.
+- Messages sent while a document is building are answered but not acted on; the user resends after the files arrive.
+
+---
+
 ## 2026-09-30 — Page-border overflow, stranded headings, schedule parsing, timeout retry, Back button, Edit & regenerate
 
 Started from three screenshots of a real report (`Report_Wipe_Out_Arena_Reloaded.docx`, 846 participants) and a Telegram "Timed out" error, and grew into a step-back feature and an edit-after-generation path. Every fix below was checked in the live bot (`@DAGClubDocBot`, driven through `dag_user.session`); the layout fixes were also checked inside real Word via COM.
