@@ -406,6 +406,46 @@ async def test_date_mismatch(chat):
             and '26-05-2026' in xml and '24-05-2026' not in xml)
 
 
+async def test_guards(chat):
+    """A bad date is re-asked, a stray word at the summary doesn't cancel, and
+    a message sent while the document builds gets a 'still generating' reply."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Date check, summary typo, busy reply")
+    print("=" * 60)
+    ok = True
+    await chat.send('/cancel', timeout=8)
+    await asyncio.sleep(0.5)
+    await chat.send('/start', timeout=8)
+    r = await chat.send('💰 Budget Form', timeout=8)
+    await _skip_event_picker_if_shown(chat, r)
+    await chat.send('LiveTest Guards 2026', label='Event name', timeout=8)
+    r = await chat.send('tomorrow', label='Bad date', timeout=8)
+    if not (r and r.text and "couldn't read that date" in r.text):
+        print("→ FAIL: bad date was accepted"); ok = False
+    r = await chat.send('1-9-26 to 3-9-26', label='Range date, loose format', timeout=8)
+    if not (r and r.text and 'Revenue' in r.text):
+        print("→ FAIL: valid range rejected"); ok = False
+    for value, label in [('Registration Fee, 50, 100', 'Revenue'), ('done', 'Done revenue'),
+                         ('Snacks, 50, 30, 45, 35', 'Expenditure'), ('done', 'Done expenditure')]:
+        r = await chat.send(value, label=label, timeout=8)
+    if not (r and r.text and '01-09-2026 to 03-09-2026' in r.text):
+        print("→ FAIL: summary doesn't show the tidied date"); ok = False
+    r = await chat.send('hmm', label='Stray word at summary', timeout=8)
+    if not (r and r.text and "didn't catch" in r.text):
+        print("→ FAIL: stray word cancelled the form"); ok = False
+    r = await chat.send('ok', label="'ok' = confirm", timeout=8)
+    if not (r and r.text and 'Generating' in r.text):
+        print("→ FAIL: 'ok' didn't start generation"); ok = False
+    await asyncio.sleep(1.0)
+    r = await chat.send('hello?', label='Message while generating', timeout=8)
+    if not (r and r.text and 'Still generating' in r.text):
+        print("→ FAIL: no busy reply"); ok = False
+    docs = await chat.collect_bot_replies(expected=4, timeout=90)
+    names = [m.document.file_name for m in docs if m.document]
+    print(f"→ Received {len(names)} document(s): {names}")
+    return ok and len(names) >= 2
+
+
 async def test_events_listing(chat):
     print("\n" + "=" * 60)
     print("TEST 5: /events listing")
@@ -451,6 +491,7 @@ async def main():
         results['Report (uploads)'] = await test_report(chat)
         results['/events listing'] = await test_events_listing(chat)
         results['Date mismatch prompt'] = await test_date_mismatch(chat)
+        results['Guards (date/typo/busy)'] = await test_guards(chat)
 
         print("\n" + "=" * 60)
         print("FINAL RESULTS")

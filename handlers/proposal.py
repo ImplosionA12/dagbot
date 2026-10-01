@@ -7,9 +7,11 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events, event_status_label
 from handlers.ui import (
-    DONE_KB, NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, OVERFLOW_KB, RETRY_KB, resolve_text, md_escape, md_wrap
+    DONE_KB, NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, OVERFLOW_KB, RETRY_KB, resolve_text, md_escape, md_wrap,
+    parse_event_date, DATE_HELP, confirm_intent, confirm_not_understood,
 )
-from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
+from handlers.busy import run_generator
+from handlers.edit_fields import Field, date_field, make_edit_handlers, resume_after_edit
 
 # States
 P_CLUB, P_COORD, P_EVENT, P_VENUE, P_DATE, P_DURATION, P_BUDGET, P_EXTRA, \
@@ -25,7 +27,7 @@ _ITEMS_PROMPT = (
 PROPOSAL_EDIT_FIELDS = [
     Field('event_name', '📛 Event name', 'Send the new event name:'),
     Field('venue', '📍 Venue', 'Send the new venue:'),
-    Field('date', '📅 Date', 'Send the new date (DD-MM-YYYY):'),
+    date_field(),
     Field('duration', '⏱ Duration', 'Send the new duration:'),
     Field('total_budget', '💰 Total budget', 'Send the new total budget:'),
     Field('extra', '🧰 Extra requirements', 'Send the new extra requirements:'),
@@ -136,7 +138,11 @@ async def proposal_venue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def proposal_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['proposal']['date'] = update.message.text
+    date = parse_event_date(update.message.text)
+    if not date:
+        await update.message.reply_text(DATE_HELP, parse_mode="Markdown")
+        return P_DATE
+    context.user_data['proposal']['date'] = date
     await update.message.reply_text("6️⃣ *Duration?*\n\nE.g. 1.5 hours (9:00 PM – 10:30 PM)", parse_mode="Markdown")
     return P_DURATION
 
@@ -267,12 +273,15 @@ proposal_edit_menu, proposal_edit_pick, proposal_edit_value = make_edit_handlers
 
 
 async def proposal_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (await resolve_text(update) or '').strip().lower()
-    if text == 'edit':
+    intent = confirm_intent(await resolve_text(update))
+    if intent == 'edit':
         return await proposal_edit_menu(update, context)
-    if text != 'confirm':
+    if intent == 'cancel':
         await update.effective_message.reply_text("Cancelled. Send /start to begin again.")
         return ConversationHandler.END
+    if intent != 'confirm':
+        await confirm_not_understood(update)
+        return P_CONFIRM
     return await _generate_proposal_docs(update, context)
 
 
@@ -301,7 +310,8 @@ async def _generate_proposal_docs(update: Update, context: ContextTypes.DEFAULT_
     event_name = p.get('event_name', 'Event')
     try:
         out_dir = event_folder(update.effective_user.id, slugify(event_name))
-        docx_path, pdf_path = generate_proposal(p, output_dir=out_dir)
+        docx_path, pdf_path = await run_generator(
+            update, generate_proposal, p, output_dir=out_dir)
         upsert_flow(update.effective_user.id, event_name, 'proposal', p)
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Error generating proposal: {str(e) or type(e).__name__}\n\n"

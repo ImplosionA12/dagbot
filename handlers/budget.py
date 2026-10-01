@@ -7,9 +7,11 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events
 from handlers.ui import (
-    DONE_KB, DONE_NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, resolve_text, md_escape, md_wrap
+    DONE_KB, DONE_NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, resolve_text, md_escape, md_wrap,
+    parse_event_date, DATE_HELP, confirm_intent, confirm_not_understood,
 )
-from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
+from handlers.busy import run_generator
+from handlers.edit_fields import Field, date_field, make_edit_handlers, resume_after_edit
 
 B_CLUB, B_COORD, B_EMPID, B_EVENT, B_DATE, \
 B_REV_ITEMS, B_EXP_ITEMS, B_CONFIRM, B_PICK, \
@@ -28,7 +30,7 @@ _EXP_PROMPT = (
 
 BUDGET_EDIT_FIELDS = [
     Field('event_name', '📛 Event name', 'Send the new event name:'),
-    Field('date', '📅 Date', 'Send the new date (DD-MM-YYYY):'),
+    date_field(),
     Field('club', '🏛 Club', 'Send the new club name:'),
     Field('coordinator', '👤 Coordinator', 'Send the new coordinator name:'),
     Field('emp_id', '🆔 Emp ID', 'Send the new employee ID:'),
@@ -141,7 +143,11 @@ async def budget_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def budget_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['budget']['date'] = update.message.text
+    date = parse_event_date(update.message.text)
+    if not date:
+        await update.message.reply_text(DATE_HELP, parse_mode="Markdown")
+        return B_DATE
+    context.user_data['budget']['date'] = date
     await update.message.reply_text(
         "6️⃣ *Revenue Items (Budget)*\n\n"
         "Send each revenue item in this format:\n"
@@ -277,12 +283,15 @@ budget_edit_menu, budget_edit_pick, budget_edit_value = make_edit_handlers(
 
 
 async def budget_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (await resolve_text(update) or '').strip().lower()
-    if text == 'edit':
+    intent = confirm_intent(await resolve_text(update))
+    if intent == 'edit':
         return await budget_edit_menu(update, context)
-    if text != 'confirm':
+    if intent == 'cancel':
         await update.effective_message.reply_text("Cancelled. Send /start to begin again.")
         return ConversationHandler.END
+    if intent != 'confirm':
+        await confirm_not_understood(update)
+        return B_CONFIRM
 
     await update.effective_message.reply_text("⏳ Generating budget form... please wait.")
     from generators.budget_gen import generate_budget
@@ -291,7 +300,8 @@ async def budget_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     event_name = b.get('event_name', 'Event')
     try:
         out_dir = event_folder(update.effective_user.id, slugify(event_name))
-        xlsx_path, docx_path, pdf_path = generate_budget(b, output_dir=out_dir)
+        xlsx_path, docx_path, pdf_path = await run_generator(
+            update, generate_budget, b, output_dir=out_dir)
         upsert_flow(update.effective_user.id, event_name, 'budget', b)
 
         # Filenames come from the paths themselves: the event name is sanitised

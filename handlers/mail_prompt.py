@@ -11,7 +11,7 @@ from telegram.ext import (
 
 from config import fixed_profile
 from event_store import list_events, get_event, upsert_flow
-from handlers.ui import NONE_KB, resolve_text, md_escape, md_wrap
+from handlers.ui import NONE_KB, resolve_text, md_escape, md_wrap, parse_event_date, DATE_HELP
 
 # States
 M_PICK, M_NEW_NAME, M_NEW_DATE, M_NEW_VENUE, M_NEW_DESC, \
@@ -111,7 +111,11 @@ async def mail_new_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mail_new_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['mail']['date'] = update.message.text.strip()
+    date = parse_event_date(update.message.text)
+    if not date:
+        await update.message.reply_text(DATE_HELP, parse_mode="Markdown")
+        return M_NEW_DATE
+    context.user_data['mail']['date'] = date
     await update.message.reply_text(
         "*Venue?*\n\n_(or 'Online' if virtual)_",
         parse_mode="Markdown"

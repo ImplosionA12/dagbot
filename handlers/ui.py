@@ -30,6 +30,77 @@ def md_wrap(s: str, mark: str = '*') -> str:
     return mark + s.replace(mark, f"{mark}\\{mark}{mark}") + mark
 
 
+_DATE_RE = re.compile(r'(\d{1,2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{2}|\d{4})(?!\d)')
+# What may sit between dates: commas, '&', 'and', 'to', dashes, spaces.
+_DATE_GLUE = re.compile(r'^(?:\s|,|&|and|to|–|—|-)*$', re.IGNORECASE)
+
+DATE_HELP = (
+    "⚠️ I couldn't read that date. Please send it as *DD-MM-YYYY*, e.g. `24-05-2026`.\n\n"
+    "Several days: `19-09-2026, 20-09-2026 & 21-09-2026`\n"
+    "A range: `19-09-2026 to 21-09-2026`"
+)
+
+
+def parse_event_date(text: str) -> str | None:
+    """One date, a list of dates, or a range → one tidy spelling; None if it
+    isn't one. Free text used to go straight into the documents, which is how a
+    single event ended up as "19-09-2026 , 20-09-2026 & 21-09-2026" in one form
+    and "08-08-2026 & 09-08-2026" in another."""
+    from datetime import date
+    text = (text or '').strip()
+    matches = list(_DATE_RE.finditer(text))
+    if not matches or len(matches) > 10:
+        return None
+    dates, pos, glue = [], 0, []
+    for m in matches:
+        between = text[pos:m.start()]
+        if not _DATE_GLUE.match(between):
+            return None
+        glue.append(between.strip().lower())
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if y < 100:
+            y += 2000
+        try:
+            dt = date(y, mo, d)
+        except ValueError:
+            return None
+        if not 2000 <= y <= 2100:
+            return None
+        dates.append(dt.strftime('%d-%m-%Y'))
+        pos = m.end()
+    if not _DATE_GLUE.match(text[pos:]) or text[pos:].strip():
+        return None
+    if len(dates) == 1:
+        return dates[0]
+    if len(dates) == 2 and glue[1] in ('to', '-', '–', '—'):
+        return f"{dates[0]} to {dates[1]}"
+    return ", ".join(dates[:-1]) + " & " + dates[-1]
+
+
+# Typed words that mean the same as the summary's buttons. Anything else used
+# to count as Cancel — one stray "ok" threw away every answer and upload.
+_CONFIRM_WORDS = {'confirm', 'yes', 'y', 'ok', 'okay', 'generate', 'generate again', 'go'}
+
+
+def confirm_intent(text: str) -> str:
+    """'confirm' | 'edit' | 'cancel' | '' (not understood) for a summary reply."""
+    t = (text or '').strip().lower().lstrip('✅✏️❌🔄 ').strip()
+    if t in _CONFIRM_WORDS:
+        return 'confirm'
+    if t in ('edit', 'edit a field'):
+        return 'edit'
+    if t == 'cancel':
+        return 'cancel'
+    return ''
+
+
+async def confirm_not_understood(update: Update):
+    await update.effective_message.reply_text(
+        "I didn't catch that — nothing is lost. Tap *Confirm* to generate, "
+        "*Edit a field* to change something, or *Cancel* to discard this form.",
+        parse_mode="Markdown", reply_markup=CONFIRM_EDIT_KB)
+
+
 # Main-menu reply keyboard, shared by /start and the end of every wizard.
 MAIN_MENU_ROWS = [
     ["📄 Event Proposal", "💰 Budget Form"],

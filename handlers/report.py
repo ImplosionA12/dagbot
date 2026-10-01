@@ -9,9 +9,11 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events
 from handlers.ui import (
-    DONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, SKIP_KB, resolve_text, md_escape, md_wrap
+    DONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, SKIP_KB, resolve_text, md_escape, md_wrap,
+    parse_event_date, DATE_HELP, confirm_intent, confirm_not_understood,
 )
-from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
+from handlers.busy import run_generator
+from handlers.edit_fields import Field, date_field, make_edit_handlers, resume_after_edit
 from handlers.xlsx_people import parse_people, summary
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ REPORT_EDIT_FIELDS = [
     Field('event_name', '📛 Event name', 'Send the new event name:'),
     Field('mode', '🌐 Mode', 'Send the new mode:', choices=('Online', 'Offline')),
     Field('venue', '📍 Venue', 'Send the new venue:'),
-    Field('date', '📅 Date', 'Send the new date (DD-MM-YYYY):'),
+    date_field(),
     Field('purpose', '📝 Purpose', 'Send the new Purpose text:'),
     Field('description', '📄 Brief description', 'Send the new Brief Description text:'),
     Field('speaker_bio', '🎤 Speaker bio', 'Send the new speaker bio:'),
@@ -263,7 +265,11 @@ async def report_venue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def report_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['report']['date'] = update.message.text
+    date = parse_event_date(update.message.text)
+    if not date:
+        await update.message.reply_text(DATE_HELP, parse_mode="Markdown")
+        return R_DATE
+    context.user_data['report']['date'] = date
     return await _ask_has_budget(update)
 
 
@@ -1076,10 +1082,8 @@ async def _apply_report_date(update, context, conflicts):
         data = copy.deepcopy(match[flow_key])
         data['date'] = r['date']
         await msg.reply_text(f"⏳ Regenerating the {_FLOW_LABEL[flow_key]} with the new date...")
-        if flow_key == 'budget':
-            paths = generate_budget(data, output_dir=out_dir)
-        else:
-            paths = generate_proposal(data, output_dir=out_dir)
+        gen = generate_budget if flow_key == 'budget' else generate_proposal
+        paths = await run_generator(update, gen, data, output_dir=out_dir)
         upsert_flow(user_id, r['event_name'], flow_key, data)
         for p in paths:
             if p and os.path.exists(p):
@@ -1108,8 +1112,6 @@ async def _apply_report_date(update, context, conflicts):
 
 async def report_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ((await resolve_text(update)) or '').strip().lower()
-    if text == 'edit':
-        return await report_edit_menu(update, context)
     r = context.user_data['report']
     user_id = update.effective_user.id
 
@@ -1117,7 +1119,15 @@ async def report_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conflicts = _date_conflicts(user_id, r)
         choice = text.split(':', 1)[1]
         if choice == 'report' and conflicts:
-            await _apply_report_date(update, context, conflicts)
+            try:
+                await _apply_report_date(update, context, conflicts)
+            except Exception as e:
+                logger.exception("re-dating budget/proposal failed")
+                await update.effective_message.reply_text(
+                    f"❌ Couldn't update the Budget/Proposal: {str(e) or type(e).__name__}\n\n"
+                    "Your answers are saved — tap *Generate again* to retry.",
+                    parse_mode="Markdown", reply_markup=RETRY_KB)
+                return R_CONFIRM
         elif choice == 'saved' and conflicts:
             r['date'] = conflicts[0][1]
             await update.effective_message.reply_text(
@@ -1126,9 +1136,15 @@ async def report_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r['_date_ok'] = r['date']
         return await _generate_report_docs(update, context)
 
-    if text != 'confirm':
+    intent = confirm_intent(text)
+    if intent == 'edit':
+        return await report_edit_menu(update, context)
+    if intent == 'cancel':
         await update.effective_message.reply_text("Cancelled. Send /start to begin again.")
         return ConversationHandler.END
+    if intent != 'confirm':
+        await confirm_not_understood(update)
+        return R_CONFIRM
 
     if _norm_date(r.get('_date_ok')) != _norm_date(r.get('date')):
         conflicts = _date_conflicts(user_id, r)
@@ -1144,7 +1160,8 @@ async def _generate_report_docs(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         event = context.user_data['report']['event_name']
         out_dir = event_folder(update.effective_user.id, slugify(event))
-        docx_path, pdf_path = generate_report(context.user_data['report'], output_dir=out_dir)
+        docx_path, pdf_path = await run_generator(
+            update, generate_report, context.user_data['report'], output_dir=out_dir)
         upsert_flow(update.effective_user.id, event, 'report', context.user_data['report'])
 
         # Big reports (1.6 MB+) can outlast the default 5s upload timeout.

@@ -46,6 +46,14 @@ class Field:
     restart_state: int | None = None
     restart_prompt: str = ''
     clears: tuple = _field(default_factory=tuple)
+    # (parse, help_text): parse(value) -> cleaned value or None to re-ask.
+    validate: tuple | None = None
+
+
+def date_field(label: str = '📅 Date') -> 'Field':
+    from handlers.ui import parse_event_date, DATE_HELP
+    return Field('date', label, 'Send the new date (DD-MM-YYYY):',
+                 validate=(parse_event_date, DATE_HELP))
 
 
 def edit_keyboard(fields: list[Field]) -> InlineKeyboardMarkup:
@@ -148,6 +156,13 @@ def make_edit_handlers(flow: str, fields: list[Field], summary_fn,
             return value_state
         if fld.choices:                        # store the canonical casing
             new = next(c for c in fld.choices if c.lower() == new.lower())
+        if fld.validate:
+            parse, help_text = fld.validate
+            cleaned = parse(new)
+            if not cleaned:
+                await update.effective_message.reply_text(help_text, parse_mode="Markdown")
+                return value_state
+            new = cleaned
 
         data[key] = new
         context.user_data.pop(_EDITING, None)

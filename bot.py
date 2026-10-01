@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from config import fixed_profile, ALLOWED_USER_ID
 from event_store import list_events, get_event, delete_event, event_status_label, event_folder
 from handlers.ui import resolve_text, md_escape, md_wrap, MAIN_MENU_ROWS
+from handlers.busy import PerUserUpdateProcessor
 from handlers.back import track, back_handlers, decorate_markup, LAST_SENT
 
 
@@ -59,6 +60,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+# httpx logs every request URL at INFO, and Telegram URLs carry the bot token —
+# the logs held it in plain text thousands of times over.
+logging.getLogger('httpx').setLevel(logging.WARNING)
 
 # ── States ──────────────────────────────────────────────────────────────────
 
@@ -524,7 +528,8 @@ def main():
         update_interval=10,
     )
     app = (Application.builder().bot(MarkdownSafeBot(token))
-           .persistence(persistence).post_init(_post_init).build())
+           .persistence(persistence).post_init(_post_init)
+           .concurrent_updates(PerUserUpdateProcessor()).build())
 
     auth_filter = filters.User(user_id=ALLOWED_USER_ID)
 
