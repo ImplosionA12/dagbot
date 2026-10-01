@@ -20,7 +20,7 @@ from dataclasses import dataclass, field as _field
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from handlers.ui import resolve_text, md_escape
+from handlers.ui import resolve_text, md_escape, md_wrap
 
 # user_data key holding the summary to return to once a list section is re-entered
 _RESUME = '_edit_resume'
@@ -125,7 +125,7 @@ def make_edit_handlers(flow: str, fields: list[Field], summary_fn,
         # not the sentence introducing it.
         shown = f"\n\n```\n{current}\n```" if current else "\n\n_(currently empty)_"
         await update.effective_message.reply_text(
-            f"✏️ *{md_escape(fld.label)}*{shown}\n\n{fld.prompt}",
+            f"✏️ {md_wrap(fld.label)}{shown}\n\n{fld.prompt}",
             parse_mode="Markdown"
         )
         return value_state
@@ -151,7 +151,7 @@ def make_edit_handlers(flow: str, fields: list[Field], summary_fn,
 
         data[key] = new
         context.user_data.pop(_EDITING, None)
-        await update.effective_message.reply_text(f"✅ *{md_escape(fld.label)}* updated.",
+        await update.effective_message.reply_text(f"✅ {md_wrap(fld.label)} updated.",
                                                   parse_mode="Markdown")
         return await summary_fn(update, context)
 

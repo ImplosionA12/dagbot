@@ -7,7 +7,7 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events
 from handlers.ui import (
-    DONE_KB, DONE_NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, resolve_text, md_escape
+    DONE_KB, DONE_NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, resolve_text, md_escape, md_wrap
 )
 from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 
@@ -102,14 +102,14 @@ async def budget_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             b['date'] = flow.get('date', '')
 
     if b.get('date'):
-        msg = (f"✅ Using event: *{md_escape(b['event_name'])}*\n_(Date: {md_escape(b['date'])})_\n\n"
+        msg = (f"✅ Using event: {md_wrap(b['event_name'])}\n{md_wrap('(Date: ' + str(b['date']) + ')', '_')}\n\n"
                f"*Revenue Items (Budget)*\n\n"
                f"Send each revenue item in this format:\n`Particulars, Qty, Rate`\n\n"
                f"E.g. `Registration Fee, 50, 100`\n\nTap *None* if no revenue. Tap *Done* when finished.")
         markup = DONE_NONE_KB
         next_state = B_REV_ITEMS
     else:
-        msg = (f"✅ Using event: *{md_escape(b['event_name'])}*\n\n*Event date?*\n\nFormat: DD-MM-YYYY")
+        msg = (f"✅ Using event: {md_wrap(b['event_name'])}\n\n*Event date?*\n\nFormat: DD-MM-YYYY")
         markup = ReplyKeyboardRemove()
         next_state = B_DATE
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=markup)
@@ -187,7 +187,7 @@ async def budget_rev_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'a_qty': qty, 'a_rate': rate, 'a_amount': amount
         })
         await update.effective_message.reply_text(
-            f"✅ Added: *{md_escape(particulars)}* — {qty} × ₹{rate} = ₹{amount}\n\nSend next item or tap *Done*.",
+            f"✅ Added: {md_wrap(particulars)} — {qty} × ₹{rate} = ₹{amount}\n\nSend next item or tap *Done*.",
             parse_mode="Markdown", reply_markup=DONE_KB
         )
     except Exception:
@@ -220,7 +220,7 @@ async def budget_exp_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'a_qty': a_qty, 'a_rate': a_rate, 'a_amount': a_qty * a_rate
         })
         await update.effective_message.reply_text(
-            f"✅ Added: *{md_escape(particulars)}*\n"
+            f"✅ Added: {md_wrap(particulars)}\n"
             f"  Budget: {b_qty} × ₹{b_rate} = ₹{b_qty * b_rate}\n"
             f"  Actual: {a_qty} × ₹{a_rate} = ₹{a_qty * a_rate}\n\n"
             f"Send next item or tap *Done*.",

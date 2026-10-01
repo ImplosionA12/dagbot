@@ -7,7 +7,7 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events, event_status_label
 from handlers.ui import (
-    DONE_KB, NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, OVERFLOW_KB, RETRY_KB, resolve_text, md_escape
+    DONE_KB, NONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, OVERFLOW_KB, RETRY_KB, resolve_text, md_escape, md_wrap
 )
 from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 
@@ -96,7 +96,7 @@ async def proposal_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not p.get('date'):
             p['date'] = flow.get('date', '')
 
-    msg = f"✅ Using event: *{md_escape(p['event_name'])}*\n\n"
+    msg = f"✅ Using event: {md_wrap(p['event_name'])}\n\n"
     if p.get('venue') and p.get('date'):
         msg += f"_(Venue: {p['venue']} · Date: {p['date']})_\n\n*Duration?*\nE.g. 1.5 hours (9:00 PM – 10:30 PM)"
         next_state = P_DURATION
@@ -208,7 +208,7 @@ async def proposal_budget_item(update: Update, context: ContextTypes.DEFAULT_TYP
             'total': total
         })
         await update.effective_message.reply_text(
-            f"✅ Added: *{md_escape(item_name)}* — {qty} × ₹{rate} = ₹{total}\n\nSend next item or tap *Done*.",
+            f"✅ Added: {md_wrap(item_name)} — {qty} × ₹{rate} = ₹{total}\n\nSend next item or tap *Done*.",
             parse_mode="Markdown", reply_markup=DONE_KB
         )
     except Exception:

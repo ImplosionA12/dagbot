@@ -19,6 +19,17 @@ def md_escape(s: str) -> str:
     return re.sub(r'([_*`\[])', r'\\\1', s or '')
 
 
+def md_wrap(s: str, mark: str = '*') -> str:
+    """User text wrapped in bold (*), italic (_) or code (`).
+
+    md_escape() only works *outside* an entity — inside *...* Telegram shows
+    the backslash, so "Live_Test" came out as "Live\\_Test". Inside, only the
+    entity's own mark is special, and the documented way to include it is to
+    close the entity, escape the mark, and reopen: *2*\\**2=4*."""
+    s = str(s or '')
+    return mark + s.replace(mark, f"{mark}\\{mark}{mark}") + mark
+
+
 # Main-menu reply keyboard, shared by /start and the end of every wizard.
 MAIN_MENU_ROWS = [
     ["📄 Event Proposal", "💰 Budget Form"],

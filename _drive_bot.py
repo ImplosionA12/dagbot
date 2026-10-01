@@ -329,6 +329,83 @@ async def test_report(chat):
     return len(doc_files) >= 2
 
 
+async def test_date_mismatch(chat):
+    """Report for the event TEST 2 budgeted on 24-05-2026, but dated 26-05-2026.
+    Confirm must stop and ask which date to use; 'everywhere' must regenerate
+    the Budget with the report date and re-date the Word budget attached."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Report date ≠ Budget date")
+    print("=" * 60)
+    from docx import Document
+    budget_docx = TEST_DIR / 'old_budget.docx'
+    d = Document()
+    d.add_paragraph('Event Date:')
+    d.add_paragraph('24-05-2026')
+    d.save(budget_docx)
+    img = make_image('mismatch', (90, 90, 160))
+    xlsx = make_participants_xlsx()
+
+    await chat.send('/cancel', timeout=8)
+    await asyncio.sleep(0.5)
+    await chat.send('/start', timeout=8)
+    r = await chat.send('📋 Final Event Report', timeout=8)
+    await _skip_event_picker_if_shown(chat, r)
+    for value, label in [('LiveTest Budget 2026', 'Event name (same as TEST 2)'),
+                         ('Offline', 'Mode'), ('Einstein Hall', 'Venue'),
+                         ('26-05-2026', 'Date (differs from budget)'),
+                         ('Yes', 'Has budget')]:
+        await chat.send(value, label=label, timeout=8)
+    await chat.send_document(budget_docx, label='Signed budget (Word, old date)')
+    await chat.send('done', label='Done budget', timeout=8)
+    await chat.send_photo(img, label='Signed proposal')
+    await chat.send('done', label='Done proposal', timeout=8)
+    await chat.send_photo(img, label='Approval')
+    await chat.send('done', label='Done approval', timeout=8)
+    await chat.send_photo(img, label='Brochure')
+    await chat.send('9:00 AM - 10:00 AM, Registration', label='Schedule', timeout=8)
+    await chat.send('done', label='Done schedule', timeout=8)
+    await chat.send_document(xlsx, label='Participants', timeout=15)
+    for value, label in [('No', 'Attendance'), ('Purpose text.', 'Purpose'),
+                         ('Brief text.', 'Brief'), ('No', 'Certificates')]:
+        await chat.send(value, label=label, timeout=8)
+    await chat.send_photo(img, label='Photo')
+    await chat.send('done', label='Done photos', timeout=8)
+    for value, label in [('Bob Test, 23BCE0002', 'Winner'), ('done', 'Done winners'),
+                         ('No', 'Speaker'), ('No', 'Feedback'), ('No', 'Expenditure')]:
+        await chat.send(value, label=label, timeout=8)
+
+    prompt = await chat.send('confirm', label='confirm (expect date question)', timeout=15)
+    if not (prompt and prompt.text and "dates don't match" in prompt.text):
+        print("→ No date question shown")
+        return False
+    print("ME  > [tap] Use report date everywhere")
+    try:
+        await chat.client.request_callback_answer(BOT_USERNAME, prompt.id, b'datefix:report', timeout=5)
+    except Exception:
+        pass  # the bot answers the query only after its slow work; the tap still lands
+    docs = await chat.collect_bot_replies(expected=10, timeout=180)
+    names = [m.document.file_name for m in docs if m.document]
+    for n in names:
+        print(f"   • {n}")
+
+    import json, zipfile
+    ev = json.loads((BASE / 'events' / '5422521708' / 'livetest_budget_2026' / 'event.json')
+                    .read_text(encoding='utf-8'))
+    budget_date = ev['budget']['date']
+    # The attached Word budget is embedded as page images, so check the
+    # attachment the report was built from, not the report's own XML.
+    attached = (ev.get('report') or {}).get('signed_budget_files') or ['']
+    xml = ''
+    if attached[0].endswith('.docx') and Path(attached[0]).exists():
+        xml = zipfile.ZipFile(attached[0]).read('word/document.xml').decode('utf-8')
+    print(f"→ saved budget date now: {budget_date}")
+    print(f"→ attached budget {Path(attached[0]).name}: old date={'24-05-2026' in xml}, new date={'26-05-2026' in xml}")
+    return (any(n.startswith('Budget_') for n in names)
+            and any(n.startswith('Report_') for n in names)
+            and budget_date == '26-05-2026'
+            and '26-05-2026' in xml and '24-05-2026' not in xml)
+
+
 async def test_events_listing(chat):
     print("\n" + "=" * 60)
     print("TEST 5: /events listing")
@@ -373,6 +450,7 @@ async def main():
         results['Mail Prompt'] = await test_mail_prompt(chat)
         results['Report (uploads)'] = await test_report(chat)
         results['/events listing'] = await test_events_listing(chat)
+        results['Date mismatch prompt'] = await test_date_mismatch(chat)
 
         print("\n" + "=" * 60)
         print("FINAL RESULTS")

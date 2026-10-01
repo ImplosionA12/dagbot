@@ -9,7 +9,7 @@ from telegram.ext import (
 from config import fixed_profile
 from event_store import list_events
 from handlers.ui import (
-    DONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, SKIP_KB, resolve_text, md_escape
+    DONE_KB, CONFIRM_KB, CONFIRM_EDIT_KB, RETRY_KB, SKIP_KB, resolve_text, md_escape, md_wrap
 )
 from handlers.edit_fields import Field, make_edit_handlers, resume_after_edit
 from handlers.xlsx_people import parse_people, summary
@@ -168,13 +168,13 @@ async def report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r['date'] = flow.get('date', '')
 
     summary_parts = []
-    if r.get('venue'): summary_parts.append(f"Venue: {md_escape(r['venue'])}")
-    if r.get('date'): summary_parts.append(f"Date: {md_escape(r['date'])}")
-    sub = f"\n_({' · '.join(summary_parts)})_" if summary_parts else ""
+    if r.get('venue'): summary_parts.append(f"Venue: {r['venue']}")
+    if r.get('date'): summary_parts.append(f"Date: {r['date']}")
+    sub = "\n" + md_wrap(f"({' · '.join(summary_parts)})", '_') if summary_parts else ""
 
     keyboard = [["Online", "Offline"]]
     await update.effective_message.reply_text(
-        f"✅ Using event: *{md_escape(r['event_name'])}*{sub}\n\n*Mode of Conduct?*",
+        f"✅ Using event: {md_wrap(r['event_name'])}{sub}\n\n*Mode of Conduct?*",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     )
@@ -477,7 +477,7 @@ async def report_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         added.append((time_slot, activity))
 
     if added:
-        lines = "\n".join(f"• `{md_escape(t)}` — {md_escape(a)}" for t, a in added)
+        lines = "\n".join(f"• {md_wrap(t, '`')} — {md_escape(a)}" for t, a in added)
         await update.effective_message.reply_text(
             f"✅ Added {len(added)} entr{'y' if len(added) == 1 else 'ies'}:\n{lines}\n\n"
             f"Send more or tap *Done*.",
@@ -975,14 +975,169 @@ report_edit_menu, report_edit_pick, report_edit_value = make_edit_handlers(
     'report', REPORT_EDIT_FIELDS, _report_summary, R_EDIT_PICK, R_EDIT_VALUE)
 
 
+def _norm_date(s) -> str:
+    return re.sub(r'\s+', '', str(s or '')).lower()
+
+
+def _date_conflicts(user_id: int, r: dict) -> list[tuple[str, str]]:
+    """Saved Proposal/Budget of this event whose date differs from the report's.
+    Returns [(flow_key, saved_date)]."""
+    match = next((ev for ev in list_events(user_id)
+                  if ev.get('name') == r.get('event_name')), None)
+    if not match or not r.get('date'):
+        return []
+    out = []
+    for flow_key in ('budget', 'proposal'):
+        saved = (match.get(flow_key) or {}).get('date', '')
+        if saved and _norm_date(saved) != _norm_date(r['date']):
+            out.append((flow_key, saved))
+    return out
+
+
+_FLOW_LABEL = {'budget': 'Budget Form', 'proposal': 'Event Proposal'}
+
+
+def _replace_in_docx(src: str, old: str, new: str) -> str | None:
+    """Copy of an uploaded .docx with `old` replaced by `new` everywhere, or None
+    if `old` isn't in it. Only the text of the matching runs changes, so
+    signatures and anything else pasted into the file stay as they are."""
+    from docx import Document
+    doc = Document(src)
+    hits = 0
+
+    def fix(paragraph):
+        nonlocal hits
+        if old not in paragraph.text:
+            return
+        hits += 1
+        for run in paragraph.runs:
+            if old in run.text:
+                run.text = run.text.replace(old, new)
+                return
+        # Split across runs: put the whole line in the first run.
+        runs = paragraph.runs
+        runs[0].text = paragraph.text.replace(old, new)
+        for run in runs[1:]:
+            run.text = ''
+
+    def walk(container):
+        for p in container.paragraphs:
+            fix(p)
+        for t in container.tables:
+            for row in t.rows:
+                for cell in row.cells:
+                    walk(cell)
+
+    walk(doc)
+    for section in doc.sections:
+        for part in (section.header, section.footer):
+            walk(part)
+    if not hits:
+        return None
+    base, ext = os.path.splitext(src)
+    out = f"{base}_redated{ext}"
+    doc.save(out)
+    return out
+
+
+async def _ask_date_choice(update, r, conflicts):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    lines = "\n".join(f"• {_FLOW_LABEL[k]}: {md_wrap(d)}" for k, d in conflicts)
+    other = conflicts[0][1]
+    rows = [
+        [InlineKeyboardButton(f"Use {r['date'][:40]} everywhere", callback_data="datefix:report")],
+        [InlineKeyboardButton(f"Use {other[:40]} in the report", callback_data="datefix:saved")],
+        [InlineKeyboardButton("Keep both as they are", callback_data="datefix:keep")],
+    ]
+    await update.effective_message.reply_text(
+        "📅 *The dates don't match*\n\n"
+        f"Report date: {md_wrap(r['date'])}\n{lines}\n\n"
+        "Which date should the documents use?\n"
+        "_Everywhere_ also regenerates the Budget/Proposal with the report date "
+        "and updates the copies attached to this report.",
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+    return R_CONFIRM
+
+
+async def _apply_report_date(update, context, conflicts):
+    """Regenerate the saved Budget/Proposal with the report's date and re-date
+    the copies attached to the report."""
+    from generators.budget_gen import generate_budget
+    from generators.proposal_gen import generate_proposal
+    from event_store import upsert_flow, event_folder, slugify
+    import copy
+    user_id = update.effective_user.id
+    r = context.user_data['report']
+    match = next(ev for ev in list_events(user_id) if ev.get('name') == r['event_name'])
+    out_dir = event_folder(user_id, slugify(r['event_name']))
+    msg = update.effective_message
+    not_updated = []
+    for flow_key, old in conflicts:
+        data = copy.deepcopy(match[flow_key])
+        data['date'] = r['date']
+        await msg.reply_text(f"⏳ Regenerating the {_FLOW_LABEL[flow_key]} with the new date...")
+        if flow_key == 'budget':
+            paths = generate_budget(data, output_dir=out_dir)
+        else:
+            paths = generate_proposal(data, output_dir=out_dir)
+        upsert_flow(user_id, r['event_name'], flow_key, data)
+        for p in paths:
+            if p and os.path.exists(p):
+                with open(p, 'rb') as f:
+                    await msg.reply_document(f, filename=os.path.basename(p),
+                                             write_timeout=180, read_timeout=180)
+        # The copy attached to the report: re-date it in place if it's Word.
+        key = f'signed_{flow_key}_files'
+        files = r.get(key) or []
+        for i, path in enumerate(files):
+            new = None
+            if path.lower().endswith('.docx') and os.path.exists(path):
+                try:
+                    new = _replace_in_docx(path, old, r['date'])
+                except Exception:
+                    logger.exception("re-dating %s failed", path)
+            if new:
+                files[i] = new
+            elif not path.lower().endswith('.docx'):
+                not_updated.append(f"{_FLOW_LABEL[flow_key]} ({os.path.basename(path).rsplit('.', 1)[-1].upper()})")
+    if not_updated:
+        await msg.reply_text(
+            "⚠️ These attached files are scans/PDFs, so their date can't be changed: "
+            + ", ".join(not_updated) + ". Re-upload them if they need the new date.")
+
+
 async def report_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ((await resolve_text(update)) or '').strip().lower()
     if text == 'edit':
         return await report_edit_menu(update, context)
+    r = context.user_data['report']
+    user_id = update.effective_user.id
+
+    if text.startswith('datefix:'):
+        conflicts = _date_conflicts(user_id, r)
+        choice = text.split(':', 1)[1]
+        if choice == 'report' and conflicts:
+            await _apply_report_date(update, context, conflicts)
+        elif choice == 'saved' and conflicts:
+            r['date'] = conflicts[0][1]
+            await update.effective_message.reply_text(
+                f"✅ Report date set to {md_wrap(r['date'])}.", parse_mode="Markdown")
+        # Remember the decision so a regenerate doesn't ask again for the same date.
+        r['_date_ok'] = r['date']
+        return await _generate_report_docs(update, context)
+
     if text != 'confirm':
         await update.effective_message.reply_text("Cancelled. Send /start to begin again.")
         return ConversationHandler.END
 
+    if _norm_date(r.get('_date_ok')) != _norm_date(r.get('date')):
+        conflicts = _date_conflicts(user_id, r)
+        if conflicts:
+            return await _ask_date_choice(update, r, conflicts)
+    return await _generate_report_docs(update, context)
+
+
+async def _generate_report_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("⏳ Generating final report... this may take a minute.")
     from generators.report_gen import generate_report
     from event_store import upsert_flow, event_folder, slugify

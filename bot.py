@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from config import fixed_profile, ALLOWED_USER_ID
 from event_store import list_events, get_event, delete_event, event_status_label, event_folder
-from handlers.ui import resolve_text, md_escape, MAIN_MENU_ROWS
+from handlers.ui import resolve_text, md_escape, md_wrap, MAIN_MENU_ROWS
 from handlers.back import track, back_handlers, decorate_markup, LAST_SENT
 
 
@@ -191,7 +191,7 @@ async def events_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = event_status_label(ev)
         name = ev.get('name', ev.get('slug', '?'))
         updated = ev.get('updated_at', '')[:10]
-        lines.append(f"• *{md_escape(name)}* — `{status}` _(updated {updated})_")
+        lines.append(f"• {md_wrap(name)} — `{status}` _(updated {updated})_")
         keyboard.append([f"📂 {name}"])
 
     lines.append("\n_P = Proposal · B = Budget · R = Report_\n")
@@ -222,7 +222,7 @@ async def _show_event_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
     artifacts, _ = _event_artifacts(user_id, slug)
 
     lines = [
-        f"*{md_escape(match.get('name', '?'))}*\n",
+        f"{md_wrap(match.get('name', '?'))}\n",
         f"📅 Created: {match.get('created_at', '?')[:10]}",
         f"🔄 Updated: {match.get('updated_at', '?')[:10]}",
         "",
