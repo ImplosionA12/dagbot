@@ -408,9 +408,17 @@ async def test_date_mismatch(chat):
     print(f"→ saved budget date now: {budget_date}")
     print(f"→ attached budget {Path(attached[0]).name}: old date={'24-05-2026' in xml}, new date={'26-05-2026' in xml}")
     print(f"→ attached expenditure {Path(exp[0]).name}: old date={'24-05-2026' in exml}, new date={'26-05-2026' in exml}")
+    # Uploads must be kept with the event, not left in temp/.
+    upload_paths = [p for k in ('signed_budget_files', 'signed_proposal_files', 'expenditure_files',
+                                'approval_images', 'photos')
+                    for p in (ev.get('report') or {}).get(k) or []]
+    in_event = all(f"{os.sep}livetest_budget_2026{os.sep}uploads{os.sep}" in p and Path(p).exists()
+                   for p in upload_paths)
+    print(f"→ {len(upload_paths)} uploads kept in the event's uploads folder: {in_event}")
     return (any(n.startswith('Budget_') for n in names)
             and any(n.startswith('Report_') for n in names)
             and budget_date == '26-05-2026'
+            and in_event and len(upload_paths) >= 5
             and '26-05-2026' in xml and '24-05-2026' not in xml
             and '26-05-2026' in exml and '24-05-2026' not in exml)
 
@@ -446,12 +454,21 @@ async def test_guards(chat):
     if not (r and r.text and 'Generating' in r.text):
         print("→ FAIL: 'ok' didn't start generation"); ok = False
     await asyncio.sleep(1.0)
-    r = await chat.send('hello?', label='Message while generating', timeout=8)
-    if not (r and r.text and 'Still generating' in r.text):
-        print("→ FAIL: no busy reply"); ok = False
-    docs = await chat.collect_bot_replies(expected=4, timeout=90)
-    names = [m.document.file_name for m in docs if m.document]
+    r = await chat.send('/events', label='/events while generating (must be queued, not dropped)', timeout=8)
+    if not (r and r.text and 'still being made' in r.text):
+        print("→ FAIL: no 'queued' acknowledgement"); ok = False
+    later = await chat.collect_bot_replies(expected=6, timeout=90)
+    later.sort(key=lambda m: m.id)
+    names = [m.document.file_name for m in later if m.document]
     print(f"→ Received {len(names)} document(s): {names}")
+    events_idx = next((i for i, m in enumerate(later) if m.text and 'Your Events' in m.text), None)
+    last_doc_idx = max((i for i, m in enumerate(later) if m.document), default=-1)
+    if events_idx is None:
+        print("→ FAIL: the queued /events was never handled"); ok = False
+    elif events_idx < last_doc_idx:
+        print("→ FAIL: /events was handled before the documents were sent"); ok = False
+    else:
+        print("→ queued /events answered after the documents ✔")
     return ok and len(names) >= 2
 
 

@@ -79,10 +79,28 @@ httpx logs every request URL at INFO, and Telegram URLs carry the token. `loggin
 - `bot.py`: httpx log level, `PerUserUpdateProcessor`, `md_wrap` (§5–7)
 - `_drive_bot.py`: TEST 6, TEST 7 (§8)
 
+### 9. Uploads kept with their event, and a daily backup
+
+**Problem:** uploads (scans, photos, Excel) lived only in `temp/`, and saved events only in `events/`. Both are git-ignored and on one disk, so clearing `temp/` broke Edit & regenerate, and a disk failure lost everything.
+
+**Fix:**
+- `event_store._keep_uploads()`: `upsert_flow` copies every upload the saved data points at from `temp/` into `events/<user>/<slug>/uploads/` and saves those paths instead. `adopt_uploads()` does the same for events saved earlier; it runs at startup, is idempotent, and preserves `updated_at` and file mtime so the `/events` order doesn't change. It moved the uploads of 2 real events (19 files). The `uploads/` subfolder is invisible in My Events' file list, which only lists files.
+- **New `backup.py`:** zips `events/` (answers, generated files, uploads) to `BACKUP_DIR` (default `C:\DAGBot_backups`, a different drive from D:) 30 s after startup and every 24 h, written as `.part` then renamed, newest 14 kept. Works under the service's LocalSystem account.
+
+**Verified:** the Wipe Out Arena report rebuilt from the moved uploads is identical to the previous one (30/30 DOCX parts, 12/12 images, 45/45 PDF pages). The backup zip passes `testzip()` and holds all 19 uploads. Live TEST 6 checks a new report's 5 uploads land in its event's `uploads/` folder.
+
+The report builder converts attached `.docx` files to PDF next to the source, so those PDFs now appear in `uploads/` too. They're harmless: `docx_to_pdf` deletes any old PDF before converting (`_clear_stale`), so a stale copy is never reused.
+
+### 10. Messages sent during generation are queued, not dropped
+
+`PerUserUpdateProcessor` now acknowledges a message that arrives mid-generation ("I'll handle this message right after it's sent") and then waits its turn behind the generation instead of being discarded. Taps get the acknowledgement as the callback answer, so `resolve_text`, `go_back` and `stale_button` now tolerate a callback that's already answered.
+
+**Verified live (TEST 7):** `/events` sent during budget generation got the acknowledgement, and the event list arrived after the three documents.
+
 ### Still open
 
 - Pressing Enter in front of *any* keep-with-next heading in Word still carries the blank lines along (it's Word behaviour). Section 5 is handled; other headings rely on Ctrl+Enter.
-- Messages sent while a document is building are answered but not acted on; the user resends after the files arrive.
+- An upload sent mid-wizard stays only in `temp/` until that flow is confirmed and saved.
 
 ---
 

@@ -148,7 +148,10 @@ async def go_back(update, context):
     """/back or the ⬅️ Back button: undo the current step, re-ask the last one."""
     q = update.callback_query
     if q is not None:
-        await q.answer()
+        try:
+            await q.answer()            # may already be answered (queued tap)
+        except Exception:
+            pass
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:

@@ -22,6 +22,7 @@ import re
 from datetime import datetime
 
 EVENTS_DIR = os.path.join(os.path.dirname(__file__), 'events')
+TEMP_DIR = os.path.join(os.path.dirname(__file__), 'temp')
 
 
 def slugify(name: str) -> str:
@@ -118,6 +119,37 @@ def save_event(user_id: int, event: dict) -> str:
     return slug
 
 
+def _keep_uploads(user_id: int, slug: str, data):
+    """Copy every upload this data points at from temp/ into the event's own
+    uploads/ folder, and return the data with those paths rewritten.
+
+    Uploads used to live only in temp/, so the saved event depended on a
+    scratch folder: clearing it broke Edit & regenerate, and deleting the
+    event left its scans behind. Returns (new_data, changed)."""
+    import shutil
+    temp = os.path.normcase(os.path.abspath(TEMP_DIR)) + os.sep
+    dest_dir = os.path.join(event_folder(user_id, slug), 'uploads')
+    changed = False
+
+    def fix(x):
+        nonlocal changed
+        if isinstance(x, dict):
+            return {k: fix(v) for k, v in x.items()}
+        if isinstance(x, list):
+            return [fix(v) for v in x]
+        if (isinstance(x, str) and os.path.normcase(os.path.abspath(x)).startswith(temp)
+                and os.path.isfile(x)):
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = os.path.join(dest_dir, os.path.basename(x))
+            if not (os.path.exists(dest) and os.path.getsize(dest) == os.path.getsize(x)):
+                shutil.copy2(x, dest)
+            changed = True
+            return dest
+        return x
+
+    return fix(data), changed
+
+
 def upsert_flow(user_id: int, event_name: str, flow_type: str, data: dict) -> str:
     """flow_type ∈ {'proposal', 'budget', 'report'}.
 
@@ -125,8 +157,29 @@ def upsert_flow(user_id: int, event_name: str, flow_type: str, data: dict) -> st
     """
     slug = slugify(event_name)
     existing = get_event(user_id, slug) or {'name': event_name, 'slug': slug}
-    existing[flow_type] = data
+    existing[flow_type], _ = _keep_uploads(user_id, slug, data)
     return save_event(user_id, existing)
+
+
+def adopt_uploads(user_id: int) -> int:
+    """Move every saved event's uploads out of temp/ (events saved before
+    _keep_uploads existed). Idempotent; leaves updated_at alone so the event
+    order in /events doesn't change. Returns how many events were updated."""
+    n = 0
+    for ev in list_events(user_id):
+        new, changed = _keep_uploads(user_id, ev['slug'], ev)
+        if changed:
+            path = _event_json_path(user_id, ev['slug'])
+            mtime = os.path.getmtime(path)
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(new, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            os.utime(path, (mtime, mtime))      # /events sorts by this
+            n += 1
+    return n
 
 
 def delete_event(user_id: int, slug: str) -> bool:

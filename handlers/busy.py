@@ -3,11 +3,11 @@
 Word/Excel conversion takes 10-60 s. It used to run on the bot's event loop,
 so for that whole time the bot answered nothing — not /cancel, not Back, not
 "is it working?". Now the generator runs in a worker thread, and any message
-that arrives meanwhile gets a "still generating" reply.
+that arrives meanwhile is acknowledged at once and handled after the document
+is sent.
 
 Updates from one user are still handled strictly one after another (the wizard
-states depend on it); only a message that arrives *while that user's document
-is building* skips the queue, and it is answered without touching the wizard.
+states depend on it).
 """
 import asyncio
 import threading
@@ -44,16 +44,21 @@ async def run_generator(update: Update, fn, *args, **kwargs):
 async def _answer_busy(update: Update):
     q = update.callback_query
     if q is not None:
-        await q.answer("⏳ Still generating your document — one moment.")
+        # resolve_text() answers again later; it tolerates the second answer.
+        await q.answer("⏳ Your document is still being made — I'll do this right after.")
         return
     if update.effective_message is not None:
         await update.effective_message.reply_text(
-            "⏳ Still generating your document — it'll arrive in a moment. "
-            "Send your next step after it does.")
+            "⏳ Your document is still being made — I'll handle this message "
+            "right after it's sent.")
 
 
 class PerUserUpdateProcessor(BaseUpdateProcessor):
-    """Different users run in parallel; one user's updates run in order."""
+    """Different users run in parallel; one user's updates run in order.
+
+    A message that arrives while that user's document is building is
+    acknowledged at once, then waits its turn like any other — it used to be
+    answered and dropped, so the user had to send it again."""
 
     def __init__(self):
         super().__init__(max_concurrent_updates=64)
@@ -63,12 +68,10 @@ class PerUserUpdateProcessor(BaseUpdateProcessor):
         uid = (update.effective_user.id
                if isinstance(update, Update) and update.effective_user else 0)
         if uid in BUSY:
-            coroutine.close()         # don't feed it to the wizard mid-generation
             try:
                 await _answer_busy(update)
             except Exception:
                 pass
-            return
         async with self._locks[uid]:
             await coroutine
 

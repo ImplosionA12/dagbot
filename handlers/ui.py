@@ -149,7 +149,12 @@ async def resolve_text(update: Update) -> str | None:
     """
     q = update.callback_query
     if q is not None:
-        await q.answer()
+        try:
+            await q.answer()
+        except Exception:
+            # Already answered (a tap queued behind a generating document gets
+            # its answer up front) or too old to answer — the tap still counts.
+            pass
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:

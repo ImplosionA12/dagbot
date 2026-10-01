@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import logging
@@ -13,7 +14,8 @@ from telegram.ext import (
 from dotenv import load_dotenv
 
 from config import fixed_profile, ALLOWED_USER_ID
-from event_store import list_events, get_event, delete_event, event_status_label, event_folder
+from event_store import list_events, get_event, delete_event, event_status_label, event_folder, adopt_uploads
+from backup import backup_job
 from handlers.ui import resolve_text, md_escape, md_wrap, MAIN_MENU_ROWS
 from handlers.busy import PerUserUpdateProcessor
 from handlers.back import track, back_handlers, decorate_markup, LAST_SENT
@@ -493,6 +495,14 @@ async def _post_init(app: Application):
         BotCommand("back", "Go back one step"),
         BotCommand("cancel", "Cancel the current flow"),
     ])
+    # Events saved before uploads were kept with them still point into temp/.
+    try:
+        moved = await asyncio.to_thread(adopt_uploads, ALLOWED_USER_ID)
+        if moved:
+            logger.info("moved uploads of %d saved event(s) out of temp/", moved)
+    except Exception:
+        logger.exception("moving uploads out of temp/ failed")
+    app.job_queue.run_repeating(backup_job, interval=24 * 3600, first=30, name="events_backup")
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -624,9 +634,12 @@ def main():
         )
 
     async def stale_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer(
-            "This button has expired — send /start.", show_alert=True
-        )
+        try:
+            await update.callback_query.answer(
+                "This button has expired — send /start.", show_alert=True
+            )
+        except BadRequest:
+            pass                        # already answered (queued tap) or too old
 
     # /cancel is a conversation fallback, so with nothing in progress it reaches
     # neither conversation. Answer it here rather than let the nudge below claim it.
