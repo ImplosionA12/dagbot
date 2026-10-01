@@ -806,7 +806,14 @@ def generate_report(data: dict, output_dir: str | None = None):
     # block to the next page, leaving an empty gap backspace can't remove.
     # Plain body paragraphs split across pages naturally; the headings keep
     # with their first text line via keep_with_next.
-    _section_heading(doc, 5, 'Brief description of the event')
+    heading = _section_heading(doc, 5, 'Brief description of the event')
+    # After a long person list the prose would start part-way down the list's
+    # last page, and pushing it down with Enter in Word doesn't work: the blank
+    # lines copy the heading's keep-with-next and move with it, so they land
+    # as a gap on top of it. Start it on a fresh page instead.
+    last_list = attendees or participants
+    if len(last_list) + 1 > _LONG_TABLE_ROWS:
+        heading.paragraph_format.page_break_before = True
     p = _para(doc, 'Purpose of the Event:', bold=True, size=12)
     _set_keep_with_next(p)
     _keep_short_prose(_para(doc, data.get('purpose', ''), align=WD_ALIGN_PARAGRAPH.JUSTIFY))
