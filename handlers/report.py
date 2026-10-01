@@ -1090,10 +1090,12 @@ async def _apply_report_date(update, context, conflicts):
                 with open(p, 'rb') as f:
                     await msg.reply_document(f, filename=os.path.basename(p),
                                              write_timeout=180, read_timeout=180)
-        # The copy attached to the report: re-date it in place if it's Word.
-        key = f'signed_{flow_key}_files'
-        files = r.get(key) or []
-        for i, path in enumerate(files):
+        # The copies attached to the report: re-date them if they're Word. The
+        # Expenditure Statement is a budget form too — often the very same file —
+        # and was left showing the old date when only the signed budget was fixed.
+        keys = [f'signed_{flow_key}_files'] + (['expenditure_files'] if flow_key == 'budget' else [])
+        files = [(key, i, path) for key in keys for i, path in enumerate(r.get(key) or [])]
+        for key, i, path in files:
             new = None
             if path.lower().endswith('.docx') and os.path.exists(path):
                 try:
@@ -1101,9 +1103,10 @@ async def _apply_report_date(update, context, conflicts):
                 except Exception:
                     logger.exception("re-dating %s failed", path)
             if new:
-                files[i] = new
+                r[key][i] = new
             elif not path.lower().endswith('.docx'):
-                not_updated.append(f"{_FLOW_LABEL[flow_key]} ({os.path.basename(path).rsplit('.', 1)[-1].upper()})")
+                label = 'Expenditure Statement' if key == 'expenditure_files' else _FLOW_LABEL[flow_key]
+                not_updated.append(f"{label} ({os.path.basename(path).rsplit('.', 1)[-1].upper()})")
     if not_updated:
         await msg.reply_text(
             "⚠️ These attached files are scans/PDFs, so their date can't be changed: "

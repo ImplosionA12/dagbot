@@ -371,8 +371,11 @@ async def test_date_mismatch(chat):
     await chat.send_photo(img, label='Photo')
     await chat.send('done', label='Done photos', timeout=8)
     for value, label in [('Bob Test, 23BCE0002', 'Winner'), ('done', 'Done winners'),
-                         ('No', 'Speaker'), ('No', 'Feedback'), ('No', 'Expenditure')]:
+                         ('No', 'Speaker'), ('No', 'Feedback'), ('Yes', 'Expenditure')]:
         await chat.send(value, label=label, timeout=8)
+    # Same old-dated budget as the Expenditure Statement — it must be re-dated too.
+    await chat.send_document(budget_docx, label='Expenditure (same Word budget, old date)')
+    await chat.send('done', label='Done expenditure', timeout=8)
 
     prompt = await chat.send('confirm', label='confirm (expect date question)', timeout=15)
     if not (prompt and prompt.text and "dates don't match" in prompt.text):
@@ -398,12 +401,18 @@ async def test_date_mismatch(chat):
     xml = ''
     if attached[0].endswith('.docx') and Path(attached[0]).exists():
         xml = zipfile.ZipFile(attached[0]).read('word/document.xml').decode('utf-8')
+    exp = (ev.get('report') or {}).get('expenditure_files') or ['']
+    exml = ''
+    if exp[0].endswith('.docx') and Path(exp[0]).exists():
+        exml = zipfile.ZipFile(exp[0]).read('word/document.xml').decode('utf-8')
     print(f"→ saved budget date now: {budget_date}")
     print(f"→ attached budget {Path(attached[0]).name}: old date={'24-05-2026' in xml}, new date={'26-05-2026' in xml}")
+    print(f"→ attached expenditure {Path(exp[0]).name}: old date={'24-05-2026' in exml}, new date={'26-05-2026' in exml}")
     return (any(n.startswith('Budget_') for n in names)
             and any(n.startswith('Report_') for n in names)
             and budget_date == '26-05-2026'
-            and '26-05-2026' in xml and '24-05-2026' not in xml)
+            and '26-05-2026' in xml and '24-05-2026' not in xml
+            and '26-05-2026' in exml and '24-05-2026' not in exml)
 
 
 async def test_guards(chat):
